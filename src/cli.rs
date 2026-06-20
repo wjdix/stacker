@@ -9,8 +9,9 @@ use clap::{Parser, Subcommand};
     about = "Stacked GitHub pull requests for Jujutsu repositories"
 )]
 pub struct Cli {
+    /// Subcommand to run. With none, opens the interactive TUI.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]

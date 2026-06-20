@@ -6,6 +6,7 @@ mod jj;
 mod paths;
 mod stack;
 mod store;
+mod tui;
 mod version_guard;
 
 use std::process::ExitCode;
@@ -29,7 +30,11 @@ async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     version_guard::check()?;
 
-    match cli.command {
+    let Some(command) = cli.command else {
+        return tui::run().await;
+    };
+
+    match command {
         Command::Info => commands::info::run().await,
         Command::Status => commands::status::run().await,
         Command::Submit { stack, yes } => commands::submit::run(stack, yes).await,

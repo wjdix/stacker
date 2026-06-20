@@ -16,6 +16,7 @@ A *stack* is a linear chain of jj changes, each tagged with a bookmark, each bac
 
 | Command | Description |
 |---|---|
+| `stacker` (no args) | Open the interactive **TUI** (see below). |
 | `stacker info` | Resolved repo key, trunk commit, config. |
 | `stacker status` | Each tracked stack, ordered, with bookmark, PR #, live PR state, conflict markers. |
 | `stacker create <name>` | Register the current trunk→@ chain as a named stack (offline; no PR lookup). |
@@ -27,6 +28,16 @@ A *stack* is a linear chain of jj changes, each tagged with a bookmark, each bac
 | `stacker land [stack] [--yes]` | If the bottom PR is merged, fetch trunk, drop the bottom, and restack the rest. |
 
 Stack selection defaults to the stack containing the current change (`@`); pass a name to override.
+
+## TUI
+
+Running `stacker` with no arguments opens an interactive terminal UI for the stack containing `@` (or the first tracked stack):
+
+- **Left pane** — the stack, head on top: change-id, summary, bookmark, and `PR #`. The bullet is color-coded (green = ready to merge, yellow = not yet, red ⚠ = conflict).
+- **Right pane** — detail for the selected change's PR: title/state, a **ready-to-merge verdict** (derived from GitHub's mergeable state), and the **list of CI checks** with pass/fail/running status, failing checks listed first.
+- **Keys**: `↑/↓` (or `j/k`) move · `r` refresh · `q`/`Esc` quit.
+
+Requires a terminal and GitHub auth; for scripting use the subcommands instead.
 
 ## Configuration
 

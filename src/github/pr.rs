@@ -3,7 +3,8 @@
 use anyhow::{Context, Result};
 use octocrab::Octocrab;
 use octocrab::models::IssueState;
-use octocrab::models::pulls::PullRequest;
+use octocrab::models::pulls::{MergeableState, PullRequest};
+use octocrab::params::repos::Commitish;
 
 use crate::github::remote::GitHubRepo;
 
@@ -136,4 +137,144 @@ pub async fn update_base(
         .await
         .with_context(|| format!("failed to retarget PR #{number} to base '{base}'"))?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// PR detail for the TUI: merge readiness + CI checks.
+// ---------------------------------------------------------------------------
+
+/// Outcome of a single CI check run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckOutcome {
+    Passed,
+    Failed,
+    Running,
+    Skipped,
+    Neutral,
+}
+
+/// One CI check on the PR's head commit.
+#[derive(Debug, Clone)]
+pub struct CheckLine {
+    pub name: String,
+    pub outcome: CheckOutcome,
+}
+
+/// Whether the PR can be merged, with a human-readable reason.
+#[derive(Debug, Clone)]
+pub struct Verdict {
+    pub ready: bool,
+    pub summary: String,
+}
+
+/// Everything the TUI's right pane shows about a PR.
+#[derive(Debug, Clone)]
+pub struct PrDetail {
+    pub number: u64,
+    pub title: String,
+    pub state: PrState,
+    pub mergeable_state: &'static str,
+    pub verdict: Verdict,
+    pub checks: Vec<CheckLine>,
+    pub url: String,
+}
+
+fn classify_check(conclusion: Option<&str>) -> CheckOutcome {
+    match conclusion {
+        None => CheckOutcome::Running, // not completed yet
+        Some("success") => CheckOutcome::Passed,
+        Some("skipped") => CheckOutcome::Skipped,
+        Some("neutral") => CheckOutcome::Neutral,
+        // failure, timed_out, cancelled, action_required, stale, startup_failure, ...
+        Some(_) => CheckOutcome::Failed,
+    }
+}
+
+fn mergeable_state_label(s: Option<&MergeableState>) -> &'static str {
+    match s {
+        Some(MergeableState::Behind) => "behind",
+        Some(MergeableState::Blocked) => "blocked",
+        Some(MergeableState::Clean) => "clean",
+        Some(MergeableState::Dirty) => "dirty",
+        Some(MergeableState::Draft) => "draft",
+        Some(MergeableState::HasHooks) => "has_hooks",
+        Some(MergeableState::Unstable) => "unstable",
+        _ => "unknown",
+    }
+}
+
+fn derive_verdict(pr: &PullRequest, state: PrState, checks: &[CheckLine]) -> Verdict {
+    let failing = checks.iter().filter(|c| c.outcome == CheckOutcome::Failed).count();
+    let running = checks.iter().filter(|c| c.outcome == CheckOutcome::Running).count();
+    let suffix = if checks.is_empty() {
+        String::new()
+    } else {
+        let passed = checks.iter().filter(|c| c.outcome == CheckOutcome::Passed).count();
+        format!("  ({passed} passed, {failing} failing, {running} running)")
+    };
+    let ready = |s: &str| Verdict { ready: true, summary: format!("{s}{suffix}") };
+    let no = |s: &str| Verdict { ready: false, summary: format!("{s}{suffix}") };
+
+    match state {
+        PrState::Merged => return Verdict { ready: false, summary: "Merged".into() },
+        PrState::Closed => return Verdict { ready: false, summary: "Closed".into() },
+        _ => {}
+    }
+    if pr.draft.unwrap_or(false) {
+        return no("Draft — mark ready to merge");
+    }
+    match pr.mergeable_state {
+        Some(MergeableState::Clean) | Some(MergeableState::HasHooks) => ready("Ready to merge"),
+        Some(MergeableState::Blocked) => no("Blocked — required checks or reviews pending"),
+        Some(MergeableState::Unstable) => no("Mergeable, but checks are failing/pending"),
+        Some(MergeableState::Dirty) => no("Conflicts with the base branch"),
+        Some(MergeableState::Behind) => no("Behind base — run `stacker sync`"),
+        Some(MergeableState::Draft) => no("Draft — mark ready to merge"),
+        _ => no("Mergeability unknown — GitHub is still computing; refresh"),
+    }
+}
+
+/// Fetch full PR detail (merge readiness + check runs on the head commit).
+pub async fn fetch_detail(
+    client: &Octocrab,
+    repo: &GitHubRepo,
+    number: u64,
+) -> Result<PrDetail> {
+    let pr = client
+        .pulls(&repo.owner, &repo.repo)
+        .get(number)
+        .await
+        .with_context(|| format!("failed to fetch PR #{number}"))?;
+
+    let head_sha = pr.head.sha.clone();
+    // Checks may be unavailable (no CI, or token lacks scope); treat as empty.
+    let checks: Vec<CheckLine> = match client
+        .checks(&repo.owner, &repo.repo)
+        .list_check_runs_for_git_ref(Commitish(head_sha))
+        .send()
+        .await
+    {
+        Ok(list) => list
+            .check_runs
+            .into_iter()
+            .map(|r| CheckLine {
+                name: r.name,
+                outcome: classify_check(r.conclusion.as_deref()),
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+
+    let state = classify(&pr);
+    let verdict = derive_verdict(&pr, state, &checks);
+
+    Ok(PrDetail {
+        number,
+        title: pr.title.clone().unwrap_or_default(),
+        state,
+        mergeable_state: mergeable_state_label(pr.mergeable_state.as_ref()),
+        verdict,
+        checks,
+        url: pr.html_url.as_ref().map(|u| u.to_string()).unwrap_or_default(),
+    })
 }
