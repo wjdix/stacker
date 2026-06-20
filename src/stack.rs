@@ -1,0 +1,155 @@
+//! The stack model: combine stored metadata with the live jj graph.
+//!
+//! A named stack's membership is stored (by change-id); the *order* is derived
+//! here from the commit graph. Each entry is joined with its stored per-change
+//! metadata (bookmark, PR number, base).
+
+use std::collections::HashSet;
+
+use anyhow::{Result, anyhow};
+use jj_lib::object_id::ObjectId;
+use jj_lib::repo::{ReadonlyRepo, Repo};
+
+use crate::jj::graph::{self, Resolved};
+use crate::jj::repo::LoadedRepo;
+use crate::store::Store;
+
+/// One change in a resolved stack.
+pub struct StackEntry {
+    /// Change-id hex (the store key).
+    pub change_id: String,
+    pub short_change_id: String,
+    pub commit_id: jj_lib::backend::CommitId,
+    pub summary: String,
+    pub bookmark: Option<String>,
+    pub pr_number: Option<u64>,
+    /// Bookmark this entry should be based on (entry below, or trunk for bottom).
+    pub expected_base: String,
+    pub has_conflict: bool,
+    pub divergent: bool,
+}
+
+/// A stack resolved against the current repo, ordered trunk-nearest first.
+pub struct ResolvedStack {
+    pub name: String,
+    pub entries: Vec<StackEntry>,
+    /// Member change-ids that no longer resolve (abandoned/hidden) — prunable.
+    pub missing: Vec<String>,
+}
+
+/// Infer which tracked stack the current change (@) belongs to.
+///
+/// A stack matches if any of its members is @ or an ancestor of @. The stack
+/// with the most matching members wins; ambiguity or no match is an error
+/// directing the user to name a stack explicitly.
+pub fn infer_stack_name(loaded: &LoadedRepo, store: &Store) -> Result<String> {
+    let repo = &loaded.repo;
+    let wc_name = loaded.workspace.workspace_name();
+    let at = repo
+        .view()
+        .get_wc_commit_id(wc_name)
+        .ok_or_else(|| anyhow!("no working-copy commit for this workspace"))?
+        .clone();
+    let index = repo.index();
+
+    let mut best: Option<(usize, String)> = None;
+    let mut tie = false;
+    for (name, stack) in &store.stacks {
+        let mut count = 0usize;
+        for change_hex in &stack.members {
+            let commit = match graph::resolve_change(repo, change_hex)? {
+                Resolved::Single(c) | Resolved::Divergent(c) => c,
+                Resolved::Missing => continue,
+            };
+            if commit.id() == &at || index.is_ancestor(commit.id(), &at)? {
+                count += 1;
+            }
+        }
+        if count == 0 {
+            continue;
+        }
+        match &best {
+            Some((bc, _)) if *bc > count => {}
+            Some((bc, _)) if *bc == count => tie = true,
+            _ => {
+                best = Some((count, name.clone()));
+                tie = false;
+            }
+        }
+    }
+
+    match best {
+        Some((_, name)) if !tie => Ok(name),
+        Some(_) => Err(anyhow!(
+            "multiple tracked stacks contain the current change (@); specify one explicitly"
+        )),
+        None => Err(anyhow!(
+            "no tracked stack contains the current change (@); specify a stack name"
+        )),
+    }
+}
+
+/// Resolve a named stack: order its members and join stored metadata.
+///
+/// `trunk_bookmark` is the base shown for the bottom entry.
+pub fn resolve(
+    repo: &ReadonlyRepo,
+    store: &Store,
+    name: &str,
+    trunk_bookmark: &str,
+) -> Result<ResolvedStack> {
+    let stack = store
+        .stacks
+        .get(name)
+        .ok_or_else(|| anyhow!("no such stack: {name}"))?;
+
+    let mut commits = Vec::new();
+    let mut divergent_changes = HashSet::new();
+    let mut missing = Vec::new();
+
+    for change_hex in &stack.members {
+        match graph::resolve_change(repo, change_hex)? {
+            Resolved::Single(commit) => commits.push(commit),
+            Resolved::Divergent(commit) => {
+                divergent_changes.insert(commit.change_id().hex());
+                commits.push(commit);
+            }
+            Resolved::Missing => missing.push(change_hex.clone()),
+        }
+    }
+
+    let ordered = graph::order_by_ancestry(repo, &commits)?;
+
+    let mut entries = Vec::with_capacity(ordered.len());
+    let mut prev_bookmark: Option<String> = None;
+    for commit in &ordered {
+        let change_id = commit.change_id().hex();
+        let meta = store.changes.get(&change_id);
+        // Prefer the stored bookmark; otherwise adopt a jj bookmark at this commit.
+        let bookmark = meta
+            .and_then(|m| m.bookmark.clone())
+            .or_else(|| crate::jj::bookmarks::for_commit(repo, commit.id()));
+        let expected_base = prev_bookmark
+            .clone()
+            .unwrap_or_else(|| trunk_bookmark.to_string());
+
+        entries.push(StackEntry {
+            short_change_id: graph::short_change_id(commit),
+            commit_id: commit.id().clone(),
+            summary: graph::summary(commit),
+            bookmark: bookmark.clone(),
+            pr_number: meta.and_then(|m| m.pr_number),
+            expected_base,
+            has_conflict: commit.has_conflict(),
+            divergent: divergent_changes.contains(&change_id),
+            change_id,
+        });
+        prev_bookmark = bookmark;
+    }
+
+    Ok(ResolvedStack {
+        name: name.to_string(),
+        entries,
+        missing,
+    })
+}

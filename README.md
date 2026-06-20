@@ -1,0 +1,62 @@
+# stacker
+
+Fast, compiled CLI for managing **stacked GitHub pull requests** in **Jujutsu (jj)** repositories.
+
+A *stack* is a linear chain of jj changes, each tagged with a bookmark, each backing one GitHub PR, each based on the one below it (the bottom PR targets trunk).
+
+## Design
+
+- **Native jj** via in-process `jj-lib` (no shelling out for repo ops). Pinned to `jj-lib =0.41.0` to match the installed `jj 0.41`; a startup guard refuses to run on a version mismatch to avoid on-disk format corruption.
+- **Native GitHub** via the `octocrab` API crate. Token resolved from `GITHUB_TOKEN`, then `GH_TOKEN`, then `gh auth token`. `owner/repo` parsed from the jj git remote URL.
+- **Named, multiple stacks** per repo. Membership is stored; **order is derived from the jj commit graph**.
+- **Metadata** lives in a global, per-repo state dir (keyed by the canonical `.jj/repo` path), so it works across jj workspaces and is never committed.
+- **First-class conflicts**: a rebase never stops; conflicts are recorded inside commits. stacker skips conflicted changes (and everything above them), reports them, and exits non-zero.
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `stacker info` | Resolved repo key, trunk commit, config. |
+| `stacker status` | Each tracked stack, ordered, with bookmark, PR #, live PR state, conflict markers. |
+| `stacker create <name>` | Register the current trunk→@ chain as a named stack (offline; no PR lookup). |
+| `stacker import <name>` | Adopt an existing stack: register the trunk→@ chain **and** match each bookmark to its open PR, recording PR number + current base. Read-only (no push/create). |
+| `stacker untrack <name>` | Stop tracking a stack: forget stacker's metadata. Leaves jj changes, bookmarks, and PRs untouched. |
+| `stacker new [stack] [-m msg]` | Create an empty change on top of a stack and check it out. |
+| `stacker submit [stack] [--yes]` | Create/update draft PRs bottom→top with chained bases; force-push (lease-safe); maintain a stack-navigation comment. Shows a plan and confirms first. |
+| `stacker sync [stack] [--yes] [--no-fetch]` | Fetch trunk, rebase the whole stack onto it, then update all PRs. `--no-fetch` rebases onto the locally-known trunk. |
+| `stacker land [stack] [--yes]` | If the bottom PR is merged, fetch trunk, drop the bottom, and restack the rest. |
+
+Stack selection defaults to the stack containing the current change (`@`); pass a name to override.
+
+## Configuration
+
+Per-repo `config.toml` in the state dir (`stacker info` prints the path). All optional:
+
+```toml
+trunk = "main"           # rebase target bookmark
+remote = "origin"        # git remote
+bookmark_prefix = ""     # e.g. "wd/" → bookmarks like wd/add-login-form
+```
+
+## Build
+
+```sh
+cargo build --release    # no protoc needed; first build pulls jj-lib + gix
+cargo test
+```
+
+## Install
+
+```sh
+cargo install --path .           # builds release and installs to ~/.cargo/bin/stacker
+cargo install --path . --force   # reinstall after changes
+```
+
+Ensure `~/.cargo/bin` is on your `PATH`. Because stacker links `jj-lib =0.41`, reinstall after a `jj` upgrade so the two stay in lockstep (the startup version guard refuses on a mismatch).
+
+## Notes / limitations
+
+- **Working-copy handling.** Commands that read or rewrite `@`'s content (`submit`, `sync`, `land`, `new`) wrap their work in jj's normal working-copy lifecycle: they **snapshot** first (folding any uncommitted on-disk edits into `@`) and **refresh** the working copy to the head operation afterward (so the `jj` CLI never reports a stale working copy). The snapshot is the one place stacker intentionally shells out to `jj` — once, quietly — because faithful snapshotting (gitignore, auto-track, file-size limits, fsmonitor) lives in the jj CLI, not `jj-lib`; the ~10ms cost is negligible against these commands' network IO. Read-only commands (`status`, `info`) stay pure `jj-lib` and never shell out.
+- New commits created by `stacker new` inherit the **stack head's author identity** (jj-lib's library defaults carry no `user.name`/`user.email`; config-path discovery lives in the jj CLI, not the library).
+- `jj-lib`'s push/fetch spawn `git` internally, so SSH/HTTPS credentials must already work for plain `git` in the repo.
+- Keep `jj` and stacker's `jj-lib` in lockstep; after `brew upgrade jj`, rebuild stacker against the matching `jj-lib`.
