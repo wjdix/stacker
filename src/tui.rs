@@ -4,7 +4,10 @@
 //! change's PR — whether it's ready to merge and which checks are failing.
 
 use std::io::IsTerminal;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// How often the TUI re-checks PR status in the background.
+const AUTO_REFRESH: Duration = Duration::from_secs(30);
 
 use anyhow::{Result, bail};
 use octocrab::Octocrab;
@@ -55,6 +58,10 @@ struct App {
     selected: usize,
     footer: String,
     gh: Option<(Octocrab, GitHubRepo)>,
+    /// Number of PR fetches still in flight in the current batch.
+    outstanding: usize,
+    /// True while a (manual or background) status check is in progress.
+    refreshing: bool,
 }
 
 impl App {
@@ -91,6 +98,27 @@ impl App {
                 Some(_) if have_gh => Detail::Loading,
                 Some(_) => Detail::Unavailable("no GitHub auth/remote".into()),
             };
+        }
+    }
+
+    /// Begin a fetch batch: spawn the background tasks and arm the in-flight
+    /// counter so the UI can show progress and the loop can pace auto-refresh.
+    fn begin_fetch(&mut self) -> mpsc::UnboundedReceiver<FetchResult> {
+        let rx = self.spawn_fetches();
+        self.outstanding = if self.gh.is_some() {
+            self.rows.iter().filter(|r| r.pr_number.is_some()).count()
+        } else {
+            0
+        };
+        self.refreshing = self.outstanding > 0;
+        rx
+    }
+
+    /// Record one fetch result arriving; clears `refreshing` when the batch ends.
+    fn note_result(&mut self) {
+        self.outstanding = self.outstanding.saturating_sub(1);
+        if self.outstanding == 0 {
+            self.refreshing = false;
         }
     }
 
@@ -186,6 +214,8 @@ async fn gather(cwd: &std::path::Path, preferred: Option<&str>) -> Result<Option
         selected: 0,
         footer: String::new(),
         gh,
+        outstanding: 0,
+        refreshing: false,
     };
     app.mark_loading();
     if app.gh.is_none() {
@@ -198,7 +228,8 @@ async fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
 ) -> Result<()> {
-    let mut rx = app.spawn_fetches();
+    let mut rx = app.begin_fetch();
+    let mut last_refresh = Instant::now();
     terminal.draw(|f| ui(f, app))?;
 
     loop {
@@ -208,8 +239,17 @@ async fn event_loop(
         while let Ok(res) = rx.try_recv() {
             if let Some(row) = app.rows.get_mut(res.index) {
                 row.detail = res.detail;
-                dirty = true;
             }
+            app.note_result();
+            dirty = true;
+        }
+
+        // Background status check: silently re-fetch on an interval so the TUI
+        // reflects PR/check changes without the user pressing `r`.
+        if app.gh.is_some() && !app.refreshing && last_refresh.elapsed() >= AUTO_REFRESH {
+            rx = app.begin_fetch();
+            last_refresh = Instant::now();
+            dirty = true;
         }
 
         // Poll for input without blocking the result draining above.
@@ -233,7 +273,8 @@ async fn event_loop(
                 }
                 KeyCode::Char('r') if app.gh.is_some() => {
                     app.mark_loading();
-                    rx = app.spawn_fetches();
+                    rx = app.begin_fetch();
+                    last_refresh = Instant::now();
                     dirty = true;
                 }
                 KeyCode::Char('s') => {
@@ -244,7 +285,8 @@ async fn event_loop(
                     if !reload(app, &name).await? {
                         break;
                     }
-                    rx = app.spawn_fetches();
+                    rx = app.begin_fetch();
+                    last_refresh = Instant::now();
                     dirty = true;
                 }
                 KeyCode::Char('l') => {
@@ -254,7 +296,8 @@ async fn event_loop(
                     if !reload(app, &name).await? {
                         break;
                     }
-                    rx = app.spawn_fetches();
+                    rx = app.begin_fetch();
+                    last_refresh = Instant::now();
                     dirty = true;
                 }
                 KeyCode::Char('a') => {
@@ -263,7 +306,8 @@ async fn event_loop(
                     if !reload(app, &name).await? {
                         break;
                     }
-                    rx = app.spawn_fetches();
+                    rx = app.begin_fetch();
+                    last_refresh = Instant::now();
                     dirty = true;
                 }
                 _ => {}
@@ -374,10 +418,20 @@ fn ui(f: &mut Frame, app: &App) {
 
     // Footer.
     let help = "↑/↓ move   o open   s sync   l land   a add   r refresh   q quit";
-    let footer = if app.footer.is_empty() {
+    let status = if app.refreshing {
+        "⟳ checking…"
+    } else {
+        ""
+    };
+    let note = [status, app.footer.as_str()]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("   ");
+    let footer = if note.is_empty() {
         help.to_string()
     } else {
-        format!("{}   |   {help}", app.footer)
+        format!("{note}   |   {help}")
     };
     f.render_widget(
         Paragraph::new(footer).style(Style::new().fg(Color::DarkGray)),
@@ -619,6 +673,8 @@ mod tests {
             selected: 0,
             footer: String::new(),
             gh: None,
+            outstanding: 0,
+            refreshing: false,
         }
     }
 
@@ -657,6 +713,14 @@ mod tests {
         app.selected = 1;
         let content = rendered(&app, 160, 30);
         assert!(content.contains("No PR opened for this change yet."));
+    }
+
+    #[test]
+    fn refreshing_shows_footer_indicator() {
+        let mut app = sample_app();
+        app.refreshing = true;
+        let content = rendered(&app, 160, 30);
+        assert!(content.contains("checking"));
     }
 
     #[test]
@@ -707,6 +771,8 @@ mod tests {
             selected: 0,
             footer: String::new(),
             gh: None,
+            outstanding: 0,
+            refreshing: false,
         }
     }
 
