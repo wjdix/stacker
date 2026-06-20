@@ -53,6 +53,9 @@ struct Row {
 }
 
 struct App {
+    /// All tracked stack names (sorted); `stack_idx` indexes into this.
+    stacks: Vec<String>,
+    stack_idx: usize,
     name: String,
     rows: Vec<Row>,
     selected: usize,
@@ -183,6 +186,8 @@ async fn gather(cwd: &std::path::Path, preferred: Option<&str>) -> Result<Option
         .map(str::to_string)
         .or_else(|| stack::infer_stack_name(&loaded, &store).ok())
         .unwrap_or_else(|| store.stacks.keys().next().cloned().unwrap());
+    let stacks: Vec<String> = store.stacks.keys().cloned().collect();
+    let stack_idx = stacks.iter().position(|n| n == &name).unwrap_or(0);
     let resolved = stack::resolve(&loaded.repo, &store, &name, &config.trunk)?;
 
     let gh = match (
@@ -209,6 +214,8 @@ async fn gather(cwd: &std::path::Path, preferred: Option<&str>) -> Result<Option
         .collect();
 
     let mut app = App {
+        stacks,
+        stack_idx,
         name,
         rows,
         selected: 0,
@@ -230,7 +237,9 @@ async fn event_loop(
 ) -> Result<()> {
     let mut rx = app.begin_fetch();
     let mut last_refresh = Instant::now();
-    let mut prev_bottom = bottom_state(&app.rows);
+    // `None` = no baseline yet (just (re)built a stack); avoids ringing the bell
+    // merely from loading or switching to an already-ready stack.
+    let mut prev_bottom: Option<BottomState> = None;
     terminal.draw(|f| ui(f, app))?;
 
     loop {
@@ -272,10 +281,27 @@ async fn event_loop(
                     app.open_selected_pr();
                     dirty = true;
                 }
+                KeyCode::Tab | KeyCode::BackTab if app.stacks.len() > 1 => {
+                    let n = app.stacks.len();
+                    let next = if key.code == KeyCode::Tab {
+                        (app.stack_idx + 1) % n
+                    } else {
+                        (app.stack_idx + n - 1) % n
+                    };
+                    let target = app.stacks[next].clone();
+                    if reload(app, &target).await? {
+                        rx = app.begin_fetch();
+                        last_refresh = Instant::now();
+                        prev_bottom = None; // new stack → re-establish baseline
+                        app.selected = 0;
+                        dirty = true;
+                    }
+                }
                 KeyCode::Char('r') if app.gh.is_some() => {
                     app.mark_loading();
                     rx = app.begin_fetch();
                     last_refresh = Instant::now();
+                    prev_bottom = None;
                     dirty = true;
                 }
                 KeyCode::Char('s') => {
@@ -288,6 +314,7 @@ async fn event_loop(
                     }
                     rx = app.begin_fetch();
                     last_refresh = Instant::now();
+                    prev_bottom = None;
                     dirty = true;
                 }
                 KeyCode::Char('l') => {
@@ -299,6 +326,7 @@ async fn event_loop(
                     }
                     rx = app.begin_fetch();
                     last_refresh = Instant::now();
+                    prev_bottom = None;
                     dirty = true;
                 }
                 KeyCode::Char('a') => {
@@ -309,25 +337,31 @@ async fn event_loop(
                     }
                     rx = app.begin_fetch();
                     last_refresh = Instant::now();
+                    prev_bottom = None;
                     dirty = true;
                 }
                 _ => {}
             }
         }
 
-        // Alert when the bottom of the stack becomes ready to merge (or merged).
-        let now_bottom = bottom_state(&app.rows);
-        if now_bottom != prev_bottom
-            && matches!(now_bottom, BottomState::Ready | BottomState::Merged)
-        {
-            ring_bell();
-            app.footer = match now_bottom {
-                BottomState::Merged => "🔔 bottom PR merged".into(),
-                _ => "🔔 bottom PR is ready to merge".into(),
-            };
-            dirty = true;
+        // Alert when the bottom of the stack *becomes* ready to merge (or merged)
+        // while we're watching it. `prev_bottom == None` means we're still
+        // establishing the baseline for a freshly (re)built stack, so we record
+        // the first definitive state without ringing.
+        if let Some(now_bottom) = definitive_bottom(&app.rows) {
+            if let Some(prev) = prev_bottom
+                && now_bottom != prev
+                && matches!(now_bottom, BottomState::Ready | BottomState::Merged)
+            {
+                ring_bell();
+                app.footer = match now_bottom {
+                    BottomState::Merged => "🔔 bottom PR merged".into(),
+                    _ => "🔔 bottom PR is ready to merge".into(),
+                };
+                dirty = true;
+            }
+            prev_bottom = Some(now_bottom);
         }
-        prev_bottom = now_bottom;
 
         if dirty {
             terminal.draw(|f| ui(f, app))?;
@@ -406,8 +440,13 @@ fn ui(f: &mut Frame, app: &App) {
         .zip(eligible.iter())
         .map(|(row, &e)| stack_item(row, e))
         .collect();
+    let title = if app.stacks.len() > 1 {
+        format!(" Stack: {} [{}/{}] ", app.name, app.stack_idx + 1, app.stacks.len())
+    } else {
+        format!(" Stack: {} ", app.name)
+    };
     let list = List::new(items)
-        .block(Block::bordered().title(format!(" Stack: {} ", app.name)))
+        .block(Block::bordered().title(title))
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
         .highlight_symbol("▶ ");
     let mut list_state = ListState::default();
@@ -432,7 +471,11 @@ fn ui(f: &mut Frame, app: &App) {
     f.render_widget(para, cols[1]);
 
     // Footer.
-    let help = "↑/↓ move   o open   s sync   l land   a add   r refresh   q quit";
+    let help = if app.stacks.len() > 1 {
+        "↑/↓ move   ⇥ stack   o open   s sync   l land   a add   r refresh   q quit"
+    } else {
+        "↑/↓ move   o open   s sync   l land   a add   r refresh   q quit"
+    };
     let status = if app.refreshing {
         "⟳ checking…"
     } else {
@@ -473,6 +516,15 @@ fn bottom_state(rows: &[Row]) -> BottomState {
             _ => BottomState::Other,
         },
         _ => BottomState::Other,
+    }
+}
+
+/// Bottom-of-stack state, or `None` while the bottom's PR is still loading
+/// (so a pending fetch isn't mistaken for "not ready").
+fn definitive_bottom(rows: &[Row]) -> Option<BottomState> {
+    match rows.last().map(|r| &r.detail) {
+        Some(Detail::Loading) => None,
+        _ => Some(bottom_state(rows)),
     }
 }
 
@@ -695,6 +747,8 @@ mod tests {
             url: "https://github.com/o/r/pull/42".into(),
         };
         App {
+            stacks: vec!["feature".into()],
+            stack_idx: 0,
             name: "feature".into(),
             rows: vec![
                 Row {
@@ -775,6 +829,21 @@ mod tests {
     }
 
     #[test]
+    fn multiple_stacks_show_switcher_affordances() {
+        let mut app = sample_app();
+        app.stacks = vec!["alpha".into(), "feature".into()];
+        app.stack_idx = 1;
+        let content = rendered(&app, 160, 30);
+        assert!(content.contains("[2/2]")); // header position indicator
+        assert!(content.contains("⇥ stack")); // footer hint
+
+        // With a single stack, neither affordance appears.
+        let single = rendered(&sample_app(), 160, 30);
+        assert!(!single.contains("[1/1]"));
+        assert!(!single.contains("⇥ stack"));
+    }
+
+    #[test]
     fn refreshing_shows_footer_indicator() {
         let mut app = sample_app();
         app.refreshing = true;
@@ -807,6 +876,8 @@ mod tests {
 
     fn two_ready_app() -> App {
         App {
+            stacks: vec!["feature".into()],
+            stack_idx: 0,
             name: "feature".into(),
             rows: vec![
                 // head-first: index 0 = top, index 1 = bottom (nearest trunk)
