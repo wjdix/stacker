@@ -33,8 +33,9 @@ Stack selection defaults to the stack containing the current change (`@`); pass 
 
 Running `stacker` with no arguments opens an interactive terminal UI for the stack containing `@` (or the first tracked stack):
 
-- **Left pane** — the stack, head on top: change-id, summary, bookmark, and `PR #`. The bullet is color-coded (green = ready to merge, yellow = not yet, red ⚠ = conflict).
-- **Right pane** — detail for the selected change's PR: title/state, a **ready-to-merge verdict** (derived from GitHub's mergeable state), and the **list of CI checks** with pass/fail/running status, failing checks listed first. PR data loads in the background (`◌ Loading…`) without blocking navigation.
+- **Left pane** — the stack, head on top: change-id, summary, bookmark, and `PR #`. The bullet is color-coded: **green** = mergeable now, **blue** = clean but must wait for the PRs below it (or already merged), **yellow** = not ready, **red ⚠** = conflict.
+- **Right pane** — detail for the selected change's PR: title/state, a **ready-to-merge verdict**, and the **list of CI checks** with pass/fail/running status, failing checks listed first. PR data loads in the background (`◌ Loading…`) without blocking navigation.
+- **Stack-aware merge readiness.** A PR is only shown as *ready to merge now* (green) when every PR **below** it has merged. Higher PRs that GitHub reports as "clean" (they target the PR beneath them, not trunk) are shown as "Ready, but merge the PR(s) below it first" — because stacks must merge from the bottom up.
 - **Keys**: `↑/↓` (or `j/k`) move · `s` sync · `l` land · `n` new · `r` refresh · `q`/`Esc` quit.
 
 `s`/`l`/`n` run `stacker sync`/`land`/`new` on the current stack: the TUI suspends, the command runs in the normal terminal (showing its plan and confirmation prompt), then the TUI re-opens and reloads the updated stack. Requires a terminal and GitHub auth; for scripting use the subcommands instead.

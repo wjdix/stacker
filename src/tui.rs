@@ -317,8 +317,17 @@ fn ui(f: &mut Frame, app: &App) {
     let cols = Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)])
         .split(rows[0]);
 
+    // A PR is mergeable *now* only if every PR below it in the stack is merged;
+    // higher PRs may be "clean" against their base but must wait their turn.
+    let eligible = compute_eligibility(&app.rows);
+
     // Left: the stack.
-    let items: Vec<ListItem> = app.rows.iter().map(stack_item).collect();
+    let items: Vec<ListItem> = app
+        .rows
+        .iter()
+        .zip(eligible.iter())
+        .map(|(row, &e)| stack_item(row, e))
+        .collect();
     let list = List::new(items)
         .block(Block::bordered().title(format!(" Stack: {} ", app.name)))
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
@@ -331,7 +340,7 @@ fn ui(f: &mut Frame, app: &App) {
     let detail = app
         .rows
         .get(app.selected)
-        .map(detail_lines)
+        .map(|r| detail_lines(r, eligible.get(app.selected).copied().unwrap_or(false)))
         .unwrap_or_default();
     let title = app
         .rows
@@ -357,14 +366,26 @@ fn ui(f: &mut Frame, app: &App) {
     );
 }
 
-fn stack_item(row: &Row) -> ListItem<'static> {
+/// Whether each row is mergeable *now*: true iff every PR below it (closer to
+/// trunk) is already merged. Rows are head-first, so "below" means higher index.
+fn compute_eligibility(rows: &[Row]) -> Vec<bool> {
+    let mut eligible = vec![false; rows.len()];
+    let mut all_below_merged = true;
+    for i in (0..rows.len()).rev() {
+        eligible[i] = all_below_merged;
+        let merged = matches!(&rows[i].detail, Detail::Loaded(d) if d.state == PrState::Merged);
+        all_below_merged = all_below_merged && merged;
+    }
+    eligible
+}
+
+fn stack_item(row: &Row, eligible: bool) -> ListItem<'static> {
     // Status glyph: conflict > merge verdict > plain.
     let (glyph, style) = if row.has_conflict {
         ("⚠", Style::new().fg(Color::Red))
     } else {
         match &row.detail {
-            Detail::Loaded(d) if d.verdict.ready => ("●", Style::new().fg(Color::Green)),
-            Detail::Loaded(_) => ("●", Style::new().fg(Color::Yellow)),
+            Detail::Loaded(d) => merge_glyph(d, eligible),
             Detail::Loading => ("◌", Style::new().fg(Color::Cyan)),
             _ => ("●", Style::new().fg(Color::DarkGray)),
         }
@@ -384,7 +405,19 @@ fn stack_item(row: &Row) -> ListItem<'static> {
     ]))
 }
 
-fn detail_lines(row: &Row) -> Vec<Line<'static>> {
+/// Left-list glyph for a loaded PR, accounting for stack-order eligibility.
+fn merge_glyph(d: &PrDetail, eligible: bool) -> (&'static str, Style) {
+    match d.state {
+        PrState::Merged => ("●", Style::new().fg(Color::Blue)),
+        PrState::Closed => ("●", Style::new().fg(Color::DarkGray)),
+        _ if d.verdict.ready && eligible => ("●", Style::new().fg(Color::Green)),
+        // Clean per GitHub, but lower PRs must merge first.
+        _ if d.verdict.ready => ("●", Style::new().fg(Color::Blue)),
+        _ => ("●", Style::new().fg(Color::Yellow)),
+    }
+}
+
+fn detail_lines(row: &Row, eligible: bool) -> Vec<Line<'static>> {
     match &row.detail {
         Detail::Loading => vec![
             Line::from(format!("{}  {}", row.short, row.summary)),
@@ -411,11 +444,11 @@ fn detail_lines(row: &Row) -> Vec<Line<'static>> {
                 Style::new().fg(Color::Yellow),
             )),
         ],
-        Detail::Loaded(d) => loaded_detail_lines(row, d),
+        Detail::Loaded(d) => loaded_detail_lines(row, d, eligible),
     }
 }
 
-fn loaded_detail_lines(row: &Row, d: &PrDetail) -> Vec<Line<'static>> {
+fn loaded_detail_lines(row: &Row, d: &PrDetail, eligible: bool) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(Span::styled(
             format!("#{}  {}", d.number, d.title),
@@ -426,18 +459,29 @@ fn loaded_detail_lines(row: &Row, d: &PrDetail) -> Vec<Line<'static>> {
         Line::raw(""),
     ];
 
-    let (color, prefix) = if d.verdict.ready {
-        (Color::Green, "✓ ")
-    } else {
-        (Color::Yellow, "✗ ")
+    // The merge verdict accounts for stack position: a PR that's clean per
+    // GitHub still isn't mergeable until the PRs below it have landed.
+    let (color, text) = match d.state {
+        PrState::Merged => (Color::Blue, "✓ Merged".to_string()),
+        PrState::Closed => (Color::DarkGray, "Closed".to_string()),
+        _ if d.verdict.ready && eligible => (Color::Green, format!("✓ {}", d.verdict.summary)),
+        _ if d.verdict.ready => (
+            Color::Blue,
+            "• Ready, but merge the PR(s) below it in the stack first".to_string(),
+        ),
+        _ => (Color::Yellow, format!("✗ {}", d.verdict.summary)),
     };
     lines.push(Line::from(vec![
         Span::raw("Merge: "),
-        Span::styled(
-            format!("{prefix}{}", d.verdict.summary),
-            Style::new().fg(color).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(text, Style::new().fg(color).add_modifier(Modifier::BOLD)),
     ]));
+    // When clean-but-waiting, still surface the underlying check counts.
+    if d.verdict.ready && !eligible && d.state == PrState::Open {
+        lines.push(
+            Line::from(format!("       (GitHub: {})", d.verdict.summary))
+                .style(Style::new().fg(Color::DarkGray)),
+        );
+    }
     lines.push(Line::from(format!("Mergeable state: {}", d.mergeable_state)));
     lines.push(Line::raw(""));
 
@@ -601,5 +645,67 @@ mod tests {
         app.rows[0].detail = Detail::Loading;
         let content = rendered(&app, 160, 30);
         assert!(content.contains("Loading PR data"));
+    }
+
+    fn ready_pr(number: u64) -> Detail {
+        Detail::Loaded(Box::new(PrDetail {
+            number,
+            title: format!("change {number}"),
+            state: PrState::Open,
+            mergeable_state: "clean",
+            verdict: Verdict {
+                ready: true,
+                summary: "Ready to merge".into(),
+            },
+            checks: vec![],
+            url: String::new(),
+        }))
+    }
+
+    fn two_ready_app() -> App {
+        App {
+            name: "feature".into(),
+            rows: vec![
+                // head-first: index 0 = top, index 1 = bottom (nearest trunk)
+                Row {
+                    short: "top00000".into(),
+                    summary: "top".into(),
+                    bookmark: None,
+                    pr_number: Some(2),
+                    has_conflict: false,
+                    detail: ready_pr(2),
+                },
+                Row {
+                    short: "bot00000".into(),
+                    summary: "bot".into(),
+                    bookmark: None,
+                    pr_number: Some(1),
+                    has_conflict: false,
+                    detail: ready_pr(1),
+                },
+            ],
+            selected: 0,
+            footer: String::new(),
+            gh: None,
+        }
+    }
+
+    #[test]
+    fn higher_clean_pr_must_wait_for_lower() {
+        let mut app = two_ready_app();
+
+        // Both PRs are individually "clean", but only the bottom is mergeable now.
+        let eligible = compute_eligibility(&app.rows);
+        assert_eq!(eligible, vec![false, true]);
+
+        // Top PR (selected) shows the "merge lower first" state, not green-ready.
+        app.selected = 0;
+        let top = rendered(&app, 160, 30);
+        assert!(top.contains("merge the PR(s) below"));
+
+        // Bottom PR is genuinely ready to merge.
+        app.selected = 1;
+        let bottom = rendered(&app, 160, 30);
+        assert!(bottom.contains("✓ Ready to merge"));
     }
 }
