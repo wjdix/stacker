@@ -67,6 +67,21 @@ impl App {
         self.selected = self.selected.saturating_sub(1);
     }
 
+    /// Open the selected change's PR in the default browser.
+    fn open_selected_pr(&mut self) {
+        let target = match self.rows.get(self.selected).map(|r| &r.detail) {
+            Some(Detail::Loaded(d)) if !d.url.is_empty() => Some((d.number, d.url.clone())),
+            _ => None,
+        };
+        self.footer = match target {
+            Some((number, url)) => match open::that_detached(&url) {
+                Ok(()) => format!("opened PR #{number} in browser"),
+                Err(e) => format!("couldn't open browser: {e}"),
+            },
+            None => "no PR URL for the selected change".into(),
+        };
+    }
+
     /// Mark all PR rows as loading (for the initial draw and on refresh).
     fn mark_loading(&mut self) {
         let have_gh = self.gh.is_some();
@@ -212,6 +227,10 @@ async fn event_loop(
                     app.prev();
                     dirty = true;
                 }
+                KeyCode::Char('o') => {
+                    app.open_selected_pr();
+                    dirty = true;
+                }
                 KeyCode::Char('r') if app.gh.is_some() => {
                     app.mark_loading();
                     rx = app.spawn_fetches();
@@ -354,7 +373,7 @@ fn ui(f: &mut Frame, app: &App) {
     f.render_widget(para, cols[1]);
 
     // Footer.
-    let help = "↑/↓ move   s sync   l land   n new   r refresh   q quit";
+    let help = "↑/↓ move   o open   s sync   l land   n new   r refresh   q quit";
     let footer = if app.footer.is_empty() {
         help.to_string()
     } else {
@@ -625,6 +644,7 @@ mod tests {
         assert!(content.contains("✗")); // failing glyph
         assert!(content.contains("✓")); // passing glyph
         // footer advertises the action keys
+        assert!(content.contains("o open"));
         assert!(content.contains("s sync"));
         assert!(content.contains("l land"));
         assert!(content.contains("n new"));
