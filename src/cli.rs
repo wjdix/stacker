@@ -28,14 +28,20 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Register the current trunk→@ chain as a named stack.
+    /// Start a NEW stack: a fresh change on trunk (optionally in a new workspace).
     Create {
         /// Name for the new stack.
         name: String,
+        /// Create the change in a new jj workspace at this path (name derived from it).
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<std::path::PathBuf>,
+        /// Description for the new change.
+        #[arg(short, long)]
+        message: Option<String>,
     },
-    /// Import an existing stack (changes + open PRs) under stacker's control.
-    Import {
-        /// Name for the imported stack.
+    /// Adopt the current trunk→@ chain as a named stack (discovers PRs if reachable).
+    Track {
+        /// Name for the stack.
         name: String,
     },
     /// Stop tracking a stack (forgets metadata; leaves jj and PRs untouched).
@@ -43,8 +49,8 @@ pub enum Command {
         /// Name of the stack to stop tracking.
         name: String,
     },
-    /// Create a new empty change on top of a stack and check it out.
-    New {
+    /// Add a new empty change on top of an existing stack and check it out.
+    Add {
         /// Stack name; if omitted, inferred from the current change (@).
         stack: Option<String>,
         /// Description for the new change.

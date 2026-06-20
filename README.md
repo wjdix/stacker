@@ -19,10 +19,10 @@ A *stack* is a linear chain of jj changes, each tagged with a bookmark, each bac
 | `stacker` (no args) | Open the interactive **TUI** (see below). |
 | `stacker info` | Resolved repo key, trunk commit, config. |
 | `stacker status` | Each tracked stack, ordered, with bookmark, PR #, live PR state, conflict markers. |
-| `stacker create <name>` | Register the current trunk→@ chain as a named stack (offline; no PR lookup). |
-| `stacker import <name>` | Adopt an existing stack: register the trunk→@ chain **and** match each bookmark to its open PR, recording PR number + current base. Read-only (no push/create). |
+| `stacker create <name> [--workspace <path>] [-m msg]` | Start a **new** stack: a fresh change on trunk. With `--workspace <path>` the change is created in a new jj workspace at that path (name derived from it), leaving the current workspace untouched. |
+| `stacker track <name>` | Adopt the current trunk→@ chain of **existing** changes as a named stack; discovers each bookmark's open PR (number + base) when GitHub is reachable. Read-only. |
 | `stacker untrack <name>` | Stop tracking a stack: forget stacker's metadata. Leaves jj changes, bookmarks, and PRs untouched. |
-| `stacker new [stack] [-m msg]` | Create an empty change on top of a stack and check it out. |
+| `stacker add [stack] [-m msg]` | Add a new empty change on top of an existing stack and check it out. |
 | `stacker submit [stack] [--yes]` | Create/update draft PRs bottom→top with chained bases; force-push (lease-safe); maintain a stack-navigation comment. Shows a plan and confirms first. |
 | `stacker sync [stack] [--yes] [--no-fetch]` | Fetch trunk, rebase the whole stack onto it, then update all PRs. `--no-fetch` rebases onto the locally-known trunk. |
 | `stacker land [stack] [--yes]` | If the bottom PR is merged, fetch trunk, drop the bottom, and restack the rest. |
@@ -36,9 +36,9 @@ Running `stacker` with no arguments opens an interactive terminal UI for the sta
 - **Left pane** — the stack, head on top: change-id, summary, bookmark, and `PR #`. The bullet is color-coded: **green** = mergeable now, **blue** = clean but must wait for the PRs below it (or already merged), **yellow** = not ready, **red ⚠** = conflict.
 - **Right pane** — detail for the selected change's PR: title/state, a **ready-to-merge verdict**, and the **list of CI checks** with pass/fail/running status, failing checks listed first. PR data loads in the background (`◌ Loading…`) without blocking navigation.
 - **Stack-aware merge readiness.** A PR is only shown as *ready to merge now* (green) when every PR **below** it has merged. Higher PRs that GitHub reports as "clean" (they target the PR beneath them, not trunk) are shown as "Ready, but merge the PR(s) below it first" — because stacks must merge from the bottom up.
-- **Keys**: `↑/↓` (or `j/k`) move · `o` open PR in browser · `s` sync · `l` land · `n` new · `r` refresh · `q`/`Esc` quit.
+- **Keys**: `↑/↓` (or `j/k`) move · `o` open PR in browser · `s` sync · `l` land · `a` add change · `r` refresh · `q`/`Esc` quit.
 
-`s`/`l`/`n` run `stacker sync`/`land`/`new` on the current stack: the TUI suspends, the command runs in the normal terminal (showing its plan and confirmation prompt), then the TUI re-opens and reloads the updated stack. Requires a terminal and GitHub auth; for scripting use the subcommands instead.
+`s`/`l`/`a` run `stacker sync`/`land`/`add` on the current stack: the TUI suspends, the command runs in the normal terminal (showing its plan and confirmation prompt), then the TUI re-opens and reloads the updated stack. Requires a terminal and GitHub auth; for scripting use the subcommands instead.
 
 ## Configuration
 

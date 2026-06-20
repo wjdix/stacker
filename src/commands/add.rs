@@ -1,4 +1,4 @@
-//! `stacker new [stack] [-m msg]` — create a new change on top of a stack.
+//! `stacker add [stack] [-m msg]` — add a new change on top of an existing stack.
 
 use anyhow::{Result, anyhow};
 use jj_lib::object_id::ObjectId;

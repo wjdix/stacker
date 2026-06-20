@@ -16,7 +16,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
-use crate::commands::{land, new, sync};
+use crate::commands::{add, land, sync};
 use crate::config::Config;
 use crate::github::client;
 use crate::github::pr::{self, CheckOutcome, PrDetail, PrState};
@@ -257,9 +257,9 @@ async fn event_loop(
                     rx = app.spawn_fetches();
                     dirty = true;
                 }
-                KeyCode::Char('n') => {
+                KeyCode::Char('a') => {
                     let name = app.name.clone();
-                    run_new(terminal, &name).await;
+                    run_add(terminal, &name).await;
                     if !reload(app, &name).await? {
                         break;
                     }
@@ -292,11 +292,11 @@ where
     *terminal = ratatui::init();
 }
 
-/// `stacker new`, with an interactive description prompt (read in normal mode).
-async fn run_new(terminal: &mut ratatui::DefaultTerminal, name: &str) {
+/// `stacker add`, with an interactive description prompt (read in normal mode).
+async fn run_add(terminal: &mut ratatui::DefaultTerminal, name: &str) {
     use std::io::Write;
     ratatui::restore();
-    println!("\n── stacker new {name} ──\n");
+    println!("\n── stacker add {name} ──\n");
     print!("Description for the new change (optional): ");
     let _ = std::io::stdout().flush();
     let mut input = String::new();
@@ -305,7 +305,7 @@ async fn run_new(terminal: &mut ratatui::DefaultTerminal, name: &str) {
         "" => None,
         s => Some(s.to_string()),
     };
-    if let Err(e) = new::run(Some(name.to_string()), message).await {
+    if let Err(e) = add::run(Some(name.to_string()), message).await {
         eprintln!("\nerror: {e:#}");
     }
     prompt_enter();
@@ -373,7 +373,7 @@ fn ui(f: &mut Frame, app: &App) {
     f.render_widget(para, cols[1]);
 
     // Footer.
-    let help = "↑/↓ move   o open   s sync   l land   n new   r refresh   q quit";
+    let help = "↑/↓ move   o open   s sync   l land   a add   r refresh   q quit";
     let footer = if app.footer.is_empty() {
         help.to_string()
     } else {
@@ -647,7 +647,7 @@ mod tests {
         assert!(content.contains("o open"));
         assert!(content.contains("s sync"));
         assert!(content.contains("l land"));
-        assert!(content.contains("n new"));
+        assert!(content.contains("a add"));
         assert!(content.contains("q quit"));
     }
 

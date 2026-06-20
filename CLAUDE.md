@@ -46,7 +46,9 @@ src/
     remote.rs        #   parse owner/repo from the git remote URL
     pr.rs            #   create/update/find PRs, fetch state
     nav_comment.rs   #   render + upsert the stack-navigation comment
-  commands/          # one module per subcommand (info/status/create/import/untrack/new/submit/sync/land)
+  commands/          # one module per subcommand (info/status/create/track/untrack/add/submit/sync/land)
+                     #   create = new stack · track = adopt existing · add = +change on a stack
+  tui.rs             # interactive TUI (no-args): stack + per-PR merge-readiness/checks
 ```
 
 Command flow: `commands::*::run` → load repo (`jj::repo::load`) → resolve config/store/stack → act. Mutating commands (`submit`/`sync`/`land`/`new`) snapshot first and recover the working copy after.
