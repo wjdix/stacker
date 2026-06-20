@@ -34,10 +34,10 @@ Stack selection defaults to the stack containing the current change (`@`); pass 
 Running `stacker` with no arguments opens an interactive terminal UI for the stack containing `@` (or the first tracked stack):
 
 - **Left pane** — the stack, head on top: change-id, summary, bookmark, and `PR #`. The bullet is color-coded (green = ready to merge, yellow = not yet, red ⚠ = conflict).
-- **Right pane** — detail for the selected change's PR: title/state, a **ready-to-merge verdict** (derived from GitHub's mergeable state), and the **list of CI checks** with pass/fail/running status, failing checks listed first.
-- **Keys**: `↑/↓` (or `j/k`) move · `r` refresh · `q`/`Esc` quit.
+- **Right pane** — detail for the selected change's PR: title/state, a **ready-to-merge verdict** (derived from GitHub's mergeable state), and the **list of CI checks** with pass/fail/running status, failing checks listed first. PR data loads in the background (`◌ Loading…`) without blocking navigation.
+- **Keys**: `↑/↓` (or `j/k`) move · `s` sync · `l` land · `n` new · `r` refresh · `q`/`Esc` quit.
 
-Requires a terminal and GitHub auth; for scripting use the subcommands instead.
+`s`/`l`/`n` run `stacker sync`/`land`/`new` on the current stack: the TUI suspends, the command runs in the normal terminal (showing its plan and confirmation prompt), then the TUI re-opens and reloads the updated stack. Requires a terminal and GitHub auth; for scripting use the subcommands instead.
 
 ## Configuration
 

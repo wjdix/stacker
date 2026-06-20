@@ -14,7 +14,9 @@ use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
+use tokio::sync::mpsc;
 
+use crate::commands::{land, new, sync};
 use crate::config::Config;
 use crate::github::client;
 use crate::github::pr::{self, CheckOutcome, PrDetail, PrState};
@@ -27,8 +29,15 @@ use crate::store::Store;
 /// PR data state for one row.
 enum Detail {
     NoPr,
+    Loading,
     Unavailable(String),
     Loaded(Box<PrDetail>),
+}
+
+/// A fetched PR result, sent from a background task to the event loop.
+struct FetchResult {
+    index: usize,
+    detail: Detail,
 }
 
 struct Row {
@@ -58,21 +67,38 @@ impl App {
         self.selected = self.selected.saturating_sub(1);
     }
 
-    /// Fetch PR detail for every row that has a PR.
-    async fn fetch_all(&mut self) {
-        let Some((client, repo)) = &self.gh else {
-            return;
-        };
+    /// Mark all PR rows as loading (for the initial draw and on refresh).
+    fn mark_loading(&mut self) {
+        let have_gh = self.gh.is_some();
         for row in &mut self.rows {
-            let Some(n) = row.pr_number else {
-                row.detail = Detail::NoPr;
-                continue;
-            };
-            row.detail = match pr::fetch_detail(client, repo, n).await {
-                Ok(d) => Detail::Loaded(Box::new(d)),
-                Err(e) => Detail::Unavailable(format!("{e:#}")),
+            row.detail = match row.pr_number {
+                None => Detail::NoPr,
+                Some(_) if have_gh => Detail::Loading,
+                Some(_) => Detail::Unavailable("no GitHub auth/remote".into()),
             };
         }
+    }
+
+    /// Spawn one background task per PR; results stream back over the channel.
+    /// The returned receiver closes once every task has finished.
+    fn spawn_fetches(&self) -> mpsc::UnboundedReceiver<FetchResult> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        if let Some((client, repo)) = &self.gh {
+            for (index, row) in self.rows.iter().enumerate() {
+                let Some(number) = row.pr_number else { continue };
+                let tx = tx.clone();
+                let client = client.clone();
+                let repo = repo.clone();
+                tokio::spawn(async move {
+                    let detail = match pr::fetch_detail(&client, &repo, number).await {
+                        Ok(d) => Detail::Loaded(Box::new(d)),
+                        Err(e) => Detail::Unavailable(format!("{e:#}")),
+                    };
+                    let _ = tx.send(FetchResult { index, detail });
+                });
+            }
+        }
+        rx
     }
 }
 
@@ -85,21 +111,35 @@ pub async fn run() -> Result<()> {
     }
 
     let cwd = std::env::current_dir()?;
-    let loaded = repo::load(&cwd).await?;
+    let Some(mut app) = gather(&cwd, None).await? else {
+        println!("No stacks tracked yet. Use `stacker create <name>` or `stacker import <name>`.");
+        return Ok(());
+    };
+
+    let mut terminal = ratatui::init();
+    let result = event_loop(&mut terminal, &mut app).await;
+    ratatui::restore();
+    result
+}
+
+/// Load the repo and build an [`App`] for the chosen stack, or `None` if no
+/// stacks are tracked. `preferred` keeps the user on the same stack across a
+/// reload; if it no longer exists we fall back to the @-stack, then the first.
+async fn gather(cwd: &std::path::Path, preferred: Option<&str>) -> Result<Option<App>> {
+    let loaded = repo::load(cwd).await?;
     let state_dir = paths::repo_state_dir(loaded.repo_path())?;
     let config = Config::load(&state_dir)?;
     let store = Store::load(&state_dir)?;
 
     if store.stacks.is_empty() {
-        println!(
-            "No stacks tracked yet. Use `stacker create <name>` or `stacker import <name>`."
-        );
-        return Ok(());
+        return Ok(None);
     }
 
-    // The stack containing @, else the first tracked stack.
-    let name = stack::infer_stack_name(&loaded, &store)
-        .unwrap_or_else(|_| store.stacks.keys().next().cloned().unwrap());
+    let name = preferred
+        .filter(|n| store.stacks.contains_key(*n))
+        .map(str::to_string)
+        .or_else(|| stack::infer_stack_name(&loaded, &store).ok())
+        .unwrap_or_else(|| store.stacks.keys().next().cloned().unwrap());
     let resolved = stack::resolve(&loaded.repo, &store, &name, &config.trunk)?;
 
     let gh = match (
@@ -121,11 +161,7 @@ pub async fn run() -> Result<()> {
             bookmark: e.bookmark.clone(),
             pr_number: e.pr_number,
             has_conflict: e.has_conflict,
-            detail: if e.pr_number.is_some() && gh.is_none() {
-                Detail::Unavailable("no GitHub auth/remote".into())
-            } else {
-                Detail::NoPr
-            },
+            detail: Detail::NoPr,
         })
         .collect();
 
@@ -136,50 +172,144 @@ pub async fn run() -> Result<()> {
         footer: String::new(),
         gh,
     };
-
-    if app.gh.is_some() {
-        eprintln!("Loading PR data…");
-        app.fetch_all().await;
-    } else {
+    app.mark_loading();
+    if app.gh.is_none() {
         app.footer = "no GitHub auth/remote — PR data unavailable".into();
     }
-
-    let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, &mut app).await;
-    ratatui::restore();
-    result
+    Ok(Some(app))
 }
 
 async fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
 ) -> Result<()> {
-    loop {
-        terminal.draw(|f| ui(f, app))?;
+    let mut rx = app.spawn_fetches();
+    terminal.draw(|f| ui(f, app))?;
 
-        if !event::poll(Duration::from_millis(250))? {
-            continue;
-        }
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => break,
-            KeyCode::Down | KeyCode::Char('j') => app.next(),
-            KeyCode::Up | KeyCode::Char('k') => app.prev(),
-            KeyCode::Char('r') if app.gh.is_some() => {
-                app.footer = "refreshing…".into();
-                terminal.draw(|f| ui(f, app))?;
-                app.fetch_all().await;
-                app.footer.clear();
+    loop {
+        let mut dirty = false;
+
+        // Drain any PR results that arrived since the last tick.
+        while let Ok(res) = rx.try_recv() {
+            if let Some(row) = app.rows.get_mut(res.index) {
+                row.detail = res.detail;
+                dirty = true;
             }
-            _ => {}
+        }
+
+        // Poll for input without blocking the result draining above.
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => break,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.next();
+                    dirty = true;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.prev();
+                    dirty = true;
+                }
+                KeyCode::Char('r') if app.gh.is_some() => {
+                    app.mark_loading();
+                    rx = app.spawn_fetches();
+                    dirty = true;
+                }
+                KeyCode::Char('s') => {
+                    let name = app.name.clone();
+                    let title = format!("sync {name}");
+                    with_suspended(terminal, &title, sync::run(Some(name.clone()), false, false))
+                        .await;
+                    if !reload(app, &name).await? {
+                        break;
+                    }
+                    rx = app.spawn_fetches();
+                    dirty = true;
+                }
+                KeyCode::Char('l') => {
+                    let name = app.name.clone();
+                    let title = format!("land {name}");
+                    with_suspended(terminal, &title, land::run(Some(name.clone()), false)).await;
+                    if !reload(app, &name).await? {
+                        break;
+                    }
+                    rx = app.spawn_fetches();
+                    dirty = true;
+                }
+                KeyCode::Char('n') => {
+                    let name = app.name.clone();
+                    run_new(terminal, &name).await;
+                    if !reload(app, &name).await? {
+                        break;
+                    }
+                    rx = app.spawn_fetches();
+                    dirty = true;
+                }
+                _ => {}
+            }
+        }
+
+        if dirty {
+            terminal.draw(|f| ui(f, app))?;
         }
     }
     Ok(())
+}
+
+/// Leave the TUI, run a command (so its plan/confirmation/output appear in the
+/// normal terminal), wait for acknowledgement, then re-enter the TUI.
+async fn with_suspended<Fut>(terminal: &mut ratatui::DefaultTerminal, title: &str, fut: Fut)
+where
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    ratatui::restore();
+    println!("\n── stacker {title} ──\n");
+    if let Err(e) = fut.await {
+        eprintln!("\nerror: {e:#}");
+    }
+    prompt_enter();
+    *terminal = ratatui::init();
+}
+
+/// `stacker new`, with an interactive description prompt (read in normal mode).
+async fn run_new(terminal: &mut ratatui::DefaultTerminal, name: &str) {
+    use std::io::Write;
+    ratatui::restore();
+    println!("\n── stacker new {name} ──\n");
+    print!("Description for the new change (optional): ");
+    let _ = std::io::stdout().flush();
+    let mut input = String::new();
+    let _ = std::io::stdin().read_line(&mut input);
+    let message = match input.trim() {
+        "" => None,
+        s => Some(s.to_string()),
+    };
+    if let Err(e) = new::run(Some(name.to_string()), message).await {
+        eprintln!("\nerror: {e:#}");
+    }
+    prompt_enter();
+    *terminal = ratatui::init();
+}
+
+fn prompt_enter() {
+    println!("\nPress Enter to return to stacker…");
+    let mut buf = String::new();
+    let _ = std::io::stdin().read_line(&mut buf);
+}
+
+/// Rebuild the app for the same stack after a mutating command. Returns false if
+/// no tracked stacks remain (e.g. the stack was fully landed).
+async fn reload(app: &mut App, preferred: &str) -> Result<bool> {
+    let cwd = std::env::current_dir()?;
+    match gather(&cwd, Some(preferred)).await? {
+        Some(new_app) => {
+            *app = new_app;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 fn ui(f: &mut Frame, app: &App) {
@@ -215,7 +345,7 @@ fn ui(f: &mut Frame, app: &App) {
     f.render_widget(para, cols[1]);
 
     // Footer.
-    let help = "↑/↓ move   r refresh   q quit";
+    let help = "↑/↓ move   s sync   l land   n new   r refresh   q quit";
     let footer = if app.footer.is_empty() {
         help.to_string()
     } else {
@@ -235,6 +365,7 @@ fn stack_item(row: &Row) -> ListItem<'static> {
         match &row.detail {
             Detail::Loaded(d) if d.verdict.ready => ("●", Style::new().fg(Color::Green)),
             Detail::Loaded(_) => ("●", Style::new().fg(Color::Yellow)),
+            Detail::Loading => ("◌", Style::new().fg(Color::Cyan)),
             _ => ("●", Style::new().fg(Color::DarkGray)),
         }
     };
@@ -255,6 +386,15 @@ fn stack_item(row: &Row) -> ListItem<'static> {
 
 fn detail_lines(row: &Row) -> Vec<Line<'static>> {
     match &row.detail {
+        Detail::Loading => vec![
+            Line::from(format!("{}  {}", row.short, row.summary)),
+            bookmark_line(row),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "◌ Loading PR data…",
+                Style::new().fg(Color::Cyan),
+            )),
+        ],
         Detail::NoPr => vec![
             Line::from(format!("{}  {}", row.short, row.summary)),
             bookmark_line(row),
@@ -440,7 +580,11 @@ mod tests {
         assert!(content.contains("unit-tests")); // failing check is listed
         assert!(content.contains("✗")); // failing glyph
         assert!(content.contains("✓")); // passing glyph
-        assert!(content.contains("q quit")); // footer help
+        // footer advertises the action keys
+        assert!(content.contains("s sync"));
+        assert!(content.contains("l land"));
+        assert!(content.contains("n new"));
+        assert!(content.contains("q quit"));
     }
 
     #[test]
@@ -449,5 +593,13 @@ mod tests {
         app.selected = 1;
         let content = rendered(&app, 160, 30);
         assert!(content.contains("No PR opened for this change yet."));
+    }
+
+    #[test]
+    fn loading_row_shows_loading_state() {
+        let mut app = sample_app();
+        app.rows[0].detail = Detail::Loading;
+        let content = rendered(&app, 160, 30);
+        assert!(content.contains("Loading PR data"));
     }
 }
