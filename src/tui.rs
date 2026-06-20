@@ -230,6 +230,7 @@ async fn event_loop(
 ) -> Result<()> {
     let mut rx = app.begin_fetch();
     let mut last_refresh = Instant::now();
+    let mut prev_bottom = bottom_state(&app.rows);
     terminal.draw(|f| ui(f, app))?;
 
     loop {
@@ -313,6 +314,20 @@ async fn event_loop(
                 _ => {}
             }
         }
+
+        // Alert when the bottom of the stack becomes ready to merge (or merged).
+        let now_bottom = bottom_state(&app.rows);
+        if now_bottom != prev_bottom
+            && matches!(now_bottom, BottomState::Ready | BottomState::Merged)
+        {
+            ring_bell();
+            app.footer = match now_bottom {
+                BottomState::Merged => "🔔 bottom PR merged".into(),
+                _ => "🔔 bottom PR is ready to merge".into(),
+            };
+            dirty = true;
+        }
+        prev_bottom = now_bottom;
 
         if dirty {
             terminal.draw(|f| ui(f, app))?;
@@ -437,6 +452,35 @@ fn ui(f: &mut Frame, app: &App) {
         Paragraph::new(footer).style(Style::new().fg(Color::DarkGray)),
         rows[1],
     );
+}
+
+/// Notable state of the bottom-of-stack PR, for the terminal-bell alert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BottomState {
+    Other,
+    Ready,
+    Merged,
+}
+
+/// Classify the bottom of the stack (trunk-nearest = last row). The bottom is
+/// always eligible to merge (nothing below it), so a ready verdict means ready
+/// to merge now.
+fn bottom_state(rows: &[Row]) -> BottomState {
+    match rows.last().map(|r| &r.detail) {
+        Some(Detail::Loaded(d)) => match d.state {
+            PrState::Merged => BottomState::Merged,
+            _ if d.verdict.ready => BottomState::Ready,
+            _ => BottomState::Other,
+        },
+        _ => BottomState::Other,
+    }
+}
+
+/// Ring the terminal bell.
+fn ring_bell() {
+    use std::io::Write;
+    print!("\x07");
+    let _ = std::io::stdout().flush();
 }
 
 /// Whether each row is mergeable *now*: true iff every PR below it (closer to
@@ -713,6 +757,21 @@ mod tests {
         app.selected = 1;
         let content = rendered(&app, 160, 30);
         assert!(content.contains("No PR opened for this change yet."));
+    }
+
+    #[test]
+    fn bottom_state_classifies_the_last_row() {
+        // two_ready_app: bottom (last) is a ready, open PR.
+        assert_eq!(bottom_state(&two_ready_app().rows), BottomState::Ready);
+        // sample_app: bottom (last) has no PR.
+        assert_eq!(bottom_state(&sample_app().rows), BottomState::Other);
+
+        // A merged bottom classifies as Merged.
+        let mut app = two_ready_app();
+        if let Detail::Loaded(d) = &mut app.rows.last_mut().unwrap().detail {
+            d.state = PrState::Merged;
+        }
+        assert_eq!(bottom_state(&app.rows), BottomState::Merged);
     }
 
     #[test]

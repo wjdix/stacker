@@ -36,6 +36,7 @@ Running `stacker` with no arguments opens an interactive terminal UI for the sta
 - **Left pane** — the stack, head on top: change-id, summary, bookmark, and `PR #`. The bullet is color-coded: **green** = mergeable now, **blue** = clean but must wait for the PRs below it (or already merged), **yellow** = not ready, **red ⚠** = conflict.
 - **Right pane** — detail for the selected change's PR: title/state, a **ready-to-merge verdict**, and the **list of CI checks** with pass/fail/running status, failing checks listed first. PR data loads in the background (`◌ Loading…`) without blocking navigation.
 - **Background auto-refresh.** While the TUI is open it re-checks PR status/checks every 30s in the background (no input blocking); a `⟳ checking…` footer indicator shows when a refresh is in flight. `r` forces an immediate refresh.
+- **Bell on bottom ready/merged.** When the bottom of the stack (the trunk-nearest PR) becomes *ready to merge* or *merged*, the terminal bell rings once (on the transition) and the footer notes it — so you can leave the TUI open and get pinged when the stack is actionable.
 - **Stack-aware merge readiness.** A PR is only shown as *ready to merge now* (green) when every PR **below** it has merged. Higher PRs that GitHub reports as "clean" (they target the PR beneath them, not trunk) are shown as "Ready, but merge the PR(s) below it first" — because stacks must merge from the bottom up.
 - **Keys**: `↑/↓` (or `j/k`) move · `o` open PR in browser · `s` sync · `l` land · `a` add change · `r` refresh · `q`/`Esc` quit.
 
