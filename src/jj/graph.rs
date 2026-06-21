@@ -80,18 +80,40 @@ pub fn order_by_ancestry(repo: &ReadonlyRepo, commits: &[Commit]) -> Result<Vec<
     Ok(positioned.into_iter().map(|(_, c)| c).collect())
 }
 
+/// Safety cap on how far `chain_to_trunk` will walk, so a misconfigured trunk
+/// can't sweep an entire repo history.
+const MAX_CHAIN: usize = 1000;
+
 /// Walk first-parent from `head` down to (but excluding) `trunk`, returning the
 /// commits in trunk-nearest-first order. Used to discover a stack's members.
+///
+/// Stops at any commit that is an ancestor of (or equal to) `trunk` — not just
+/// the trunk commit itself — so a history where trunk is reached only via a
+/// merge's second parent doesn't cause the walk to run off into shared history.
 pub fn chain_to_trunk(
     repo: &ReadonlyRepo,
     head: &CommitId,
     trunk: &CommitId,
 ) -> Result<Vec<Commit>> {
+    let index = repo.index();
     let mut chain = Vec::new();
     let mut current = head.clone();
     let root = repo.store().root_commit_id().clone();
     loop {
-        if &current == trunk || current == root {
+        if current == root
+            || &current == trunk
+            || index
+                .is_ancestor(&current, trunk)
+                .context("ancestry check while walking to trunk")?
+        {
+            break;
+        }
+        if chain.len() >= MAX_CHAIN {
+            eprintln!(
+                "warning: stopped walking toward trunk after {MAX_CHAIN} commits; \
+                 is '{}' the right trunk?",
+                trunk.hex()
+            );
             break;
         }
         let commit = repo

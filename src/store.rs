@@ -86,6 +86,30 @@ impl Store {
         Some(stack.members.len())
     }
 
+    /// Remove the given change-ids from a stack's membership (e.g. members that
+    /// have landed or no longer resolve), forgetting metadata no longer
+    /// referenced by any stack. Returns the number removed.
+    pub fn prune_stack_members(&mut self, stack: &str, stale: &[String]) -> usize {
+        if stale.is_empty() {
+            return 0;
+        }
+        let stale: std::collections::HashSet<&String> = stale.iter().collect();
+        let removed = if let Some(s) = self.stacks.get_mut(stack) {
+            let before = s.members.len();
+            s.members.retain(|m| !stale.contains(m));
+            before - s.members.len()
+        } else {
+            0
+        };
+        for change_id in stale {
+            let still_referenced = self.stacks.values().any(|s| s.members.contains(change_id));
+            if !still_referenced {
+                self.changes.remove(change_id);
+            }
+        }
+        removed
+    }
+
     /// Persist the store atomically (write to a temp file, then rename).
     pub fn save(&self) -> Result<()> {
         let text = serde_json::to_string_pretty(self).context("failed to serialize store")?;
@@ -140,6 +164,27 @@ mod tests {
 
         // Untracking a missing stack returns None.
         assert_eq!(store.untrack_stack("missing"), None);
+    }
+
+    #[test]
+    fn prune_stack_members_drops_stale_and_orphan_meta() {
+        let mut store = Store::default();
+        store.stacks.insert(
+            "feature".into(),
+            Stack { members: vec!["a".into(), "b".into(), "c".into()] },
+        );
+        store.stacks.insert("other".into(), Stack { members: vec!["c".into()] });
+        for id in ["a", "b", "c"] {
+            store.changes.insert(id.into(), ChangeMeta::default());
+        }
+
+        // Prune a (orphan → meta dropped) and c (still in 'other' → meta kept).
+        let removed = store.prune_stack_members("feature", &["a".into(), "c".into()]);
+        assert_eq!(removed, 2);
+        assert_eq!(store.stacks["feature"].members, vec!["b"]);
+        assert!(!store.changes.contains_key("a")); // orphaned → forgotten
+        assert!(store.changes.contains_key("b"));
+        assert!(store.changes.contains_key("c")); // still referenced by 'other'
     }
 
     #[test]

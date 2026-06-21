@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::github::client;
 use crate::github::pr::{self, PrState};
 use crate::github::remote;
-use crate::jj::{fetch, repo};
+use crate::jj::{fetch, repo, trunk};
 use crate::paths;
 use crate::stack;
 use crate::store::Store;
@@ -29,7 +29,8 @@ pub async fn run(stack_name: Option<String>, yes: bool) -> Result<()> {
         None => stack::infer_stack_name(&loaded, &store)?,
     };
 
-    let resolved = stack::resolve(&loaded.repo, &store, &name, &config.trunk)?;
+    let trunk_id = trunk::resolve(&loaded.repo, &config.trunk, &config.remote).ok();
+    let resolved = stack::resolve(&loaded.repo, &store, &name, &config.trunk, trunk_id.as_ref())?;
     let bottom = resolved
         .entries
         .first()

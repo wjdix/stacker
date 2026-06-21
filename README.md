@@ -20,7 +20,7 @@ A *stack* is a linear chain of jj changes, each tagged with a bookmark, each bac
 | `stacker info` | Resolved repo key, trunk commit, config. |
 | `stacker status` | Each tracked stack, ordered, with bookmark, PR #, live PR state, conflict markers. |
 | `stacker create <name> [--workspace <path>] [-m msg]` | Start a **new** stack: a fresh change on trunk. With `--workspace <path>` the change is created in a new jj workspace at that path (name derived from it), leaving the current workspace untouched. |
-| `stacker track <name>` | Adopt the current trunk→@ chain of **existing** changes as a named stack; discovers each bookmark's open PR (number + base) when GitHub is reachable. Read-only. |
+| `stacker track <name>` | Adopt **existing** changes as a named stack. Members are the **bookmarked PR heads** between trunk and `@` (one bookmark = one PR); commits between bookmarks are that PR's content, not separate members. Discovers each PR (number + base) when GitHub is reachable. Read-only. |
 | `stacker untrack <name>` | Stop tracking a stack: forget stacker's metadata. Leaves jj changes, bookmarks, and PRs untouched. |
 | `stacker add [stack] [-m msg]` | Add a new empty change on top of an existing stack and check it out. |
 | `stacker submit [stack] [--yes]` | Create/update draft PRs bottom→top with chained bases; force-push (lease-safe); maintain a stack-navigation comment. Shows a plan and confirms first. |

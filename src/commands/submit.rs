@@ -18,6 +18,7 @@ use crate::github::remote::{self, GitHubRepo};
 use crate::jj::bookmarks;
 use crate::jj::push;
 use crate::jj::repo::{self, LoadedRepo};
+use crate::jj::trunk;
 use crate::paths;
 use crate::stack::{self, ResolvedStack};
 use crate::store::Store;
@@ -85,7 +86,18 @@ pub async fn submit_stack(
     name: &str,
     yes: bool,
 ) -> Result<()> {
-    let resolved = stack::resolve(&loaded.repo, store, name, &config.trunk)?;
+    let trunk_id = trunk::resolve(&loaded.repo, &config.trunk, &config.remote).ok();
+    let resolved = stack::resolve(&loaded.repo, store, name, &config.trunk, trunk_id.as_ref())?;
+    // Self-heal: forget members that have landed or no longer resolve.
+    let stale: Vec<String> = resolved
+        .missing
+        .iter()
+        .chain(resolved.landed.iter())
+        .cloned()
+        .collect();
+    if !stale.is_empty() {
+        store.prune_stack_members(name, &stale);
+    }
     let gh_repo = remote::resolve(&loaded.repo, &config.remote)?;
 
     let plan = build_plan(loaded, config, &resolved, name, store);

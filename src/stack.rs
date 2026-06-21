@@ -6,7 +6,8 @@
 
 use std::collections::HashSet;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
+use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId;
 use jj_lib::repo::{ReadonlyRepo, Repo};
 
@@ -35,6 +36,8 @@ pub struct ResolvedStack {
     pub entries: Vec<StackEntry>,
     /// Member change-ids that no longer resolve (abandoned/hidden) — prunable.
     pub missing: Vec<String>,
+    /// Members that have landed (are now ancestors of trunk) — prunable.
+    pub landed: Vec<String>,
 }
 
 /// Infer which tracked stack the current change (@) belongs to.
@@ -91,12 +94,16 @@ pub fn infer_stack_name(loaded: &LoadedRepo, store: &Store) -> Result<String> {
 
 /// Resolve a named stack: order its members and join stored metadata.
 ///
-/// `trunk_bookmark` is the base shown for the bottom entry.
+/// `trunk_bookmark` is the base shown for the bottom entry. When `trunk_id` is
+/// given, members that have **landed** (are now ancestors of trunk) are skipped
+/// and reported in `landed` — this self-heals stacks whose lower changes have
+/// merged, and keeps the (O(n²)) ordering bounded to live members.
 pub fn resolve(
     repo: &ReadonlyRepo,
     store: &Store,
     name: &str,
     trunk_bookmark: &str,
+    trunk_id: Option<&CommitId>,
 ) -> Result<ResolvedStack> {
     let stack = store
         .stacks
@@ -106,16 +113,30 @@ pub fn resolve(
     let mut commits = Vec::new();
     let mut divergent_changes = HashSet::new();
     let mut missing = Vec::new();
+    let mut landed = Vec::new();
 
     for change_hex in &stack.members {
-        match graph::resolve_change(repo, change_hex)? {
-            Resolved::Single(commit) => commits.push(commit),
-            Resolved::Divergent(commit) => {
-                divergent_changes.insert(commit.change_id().hex());
-                commits.push(commit);
+        let (commit, divergent) = match graph::resolve_change(repo, change_hex)? {
+            Resolved::Single(c) => (c, false),
+            Resolved::Divergent(c) => (c, true),
+            Resolved::Missing => {
+                missing.push(change_hex.clone());
+                continue;
             }
-            Resolved::Missing => missing.push(change_hex.clone()),
+        };
+        if let Some(trunk) = trunk_id
+            && repo
+                .index()
+                .is_ancestor(commit.id(), trunk)
+                .context("ancestry check while resolving stack")?
+        {
+            landed.push(change_hex.clone());
+            continue;
         }
+        if divergent {
+            divergent_changes.insert(commit.change_id().hex());
+        }
+        commits.push(commit);
     }
 
     let ordered = graph::order_by_ancestry(repo, &commits)?;
@@ -151,5 +172,6 @@ pub fn resolve(
         name: name.to_string(),
         entries,
         missing,
+        landed,
     })
 }

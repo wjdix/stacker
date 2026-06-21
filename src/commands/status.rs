@@ -7,7 +7,7 @@ use crate::config::Config;
 use crate::github::pr::{self, PrState};
 use crate::github::remote::{self, GitHubRepo};
 use crate::github::client;
-use crate::jj::repo;
+use crate::jj::{repo, trunk};
 use crate::paths;
 use crate::stack::{self, ResolvedStack};
 use crate::store::Store;
@@ -34,8 +34,10 @@ pub async fn run() -> Result<()> {
         eprintln!("note: could not resolve GitHub repo from remote '{}'.", config.remote);
     }
 
+    let trunk_id = trunk::resolve(&loaded.repo, &config.trunk, &config.remote).ok();
     for name in store.stacks.keys() {
-        let resolved = stack::resolve(&loaded.repo, &store, name, &config.trunk)?;
+        let resolved =
+            stack::resolve(&loaded.repo, &store, name, &config.trunk, trunk_id.as_ref())?;
         print_stack(&resolved, client.as_ref(), gh_repo.as_ref()).await;
         println!();
     }

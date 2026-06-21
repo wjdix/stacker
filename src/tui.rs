@@ -24,7 +24,7 @@ use crate::config::Config;
 use crate::github::client;
 use crate::github::pr::{self, CheckOutcome, PrDetail, PrState};
 use crate::github::remote::{self, GitHubRepo};
-use crate::jj::repo;
+use crate::jj::{repo, trunk};
 use crate::paths;
 use crate::stack;
 use crate::store::Store;
@@ -188,7 +188,8 @@ async fn gather(cwd: &std::path::Path, preferred: Option<&str>) -> Result<Option
         .unwrap_or_else(|| store.stacks.keys().next().cloned().unwrap());
     let stacks: Vec<String> = store.stacks.keys().cloned().collect();
     let stack_idx = stacks.iter().position(|n| n == &name).unwrap_or(0);
-    let resolved = stack::resolve(&loaded.repo, &store, &name, &config.trunk)?;
+    let trunk_id = trunk::resolve(&loaded.repo, &config.trunk, &config.remote).ok();
+    let resolved = stack::resolve(&loaded.repo, &store, &name, &config.trunk, trunk_id.as_ref())?;
 
     let gh = match (
         remote::resolve(&loaded.repo, &config.remote).ok(),

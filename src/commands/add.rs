@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 use jj_lib::object_id::ObjectId;
 
 use crate::config::Config;
-use crate::jj::{repo, workspace_ops};
+use crate::jj::{repo, trunk, workspace_ops};
 use crate::paths;
 use crate::stack;
 use crate::store::Store;
@@ -22,7 +22,8 @@ pub async fn run(stack_name: Option<String>, message: Option<String>) -> Result<
         None => stack::infer_stack_name(&loaded, &store)?,
     };
 
-    let resolved = stack::resolve(&loaded.repo, &store, &name, &config.trunk)?;
+    let trunk_id = trunk::resolve(&loaded.repo, &config.trunk, &config.remote).ok();
+    let resolved = stack::resolve(&loaded.repo, &store, &name, &config.trunk, trunk_id.as_ref())?;
     let head = resolved
         .entries
         .last()

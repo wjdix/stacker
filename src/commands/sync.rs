@@ -37,7 +37,7 @@ pub async fn run(stack_name: Option<String>, yes: bool, no_fetch: bool) -> Resul
     }
 
     let trunk_id = trunk::resolve(&loaded.repo, &config.trunk, &config.remote)?;
-    let resolved = stack::resolve(&loaded.repo, &store, &name, &config.trunk)?;
+    let resolved = stack::resolve(&loaded.repo, &store, &name, &config.trunk, Some(&trunk_id))?;
     let bottom = resolved
         .entries
         .first()

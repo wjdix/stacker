@@ -36,18 +36,24 @@ pub async fn run(name: String) -> Result<()> {
         .clone();
 
     let chain = graph::chain_to_trunk(&loaded.repo, &at, &trunk_id)?;
-    let described: Vec<_> = chain
+    // A stack member is a PR *head* — a change carrying a bookmark. Commits
+    // between consecutive bookmarks are the lower PR's content, not separate
+    // members, so we adopt only the bookmarked changes. (This is what keeps a
+    // big multi-commit branch from being registered as hundreds of "members".)
+    let heads: Vec<_> = chain
         .iter()
-        .filter(|c| !c.description().trim().is_empty())
+        .filter_map(|c| bookmarks::for_commit(&loaded.repo, c.id()).map(|bk| (c, bk)))
         .collect();
-    if described.is_empty() {
+    if heads.is_empty() {
         return Err(anyhow!(
-            "no described changes between trunk ('{}') and @ to track",
+            "no bookmarked changes between trunk ('{}') and @ to track.\n\
+             stacker tracks PR heads — bookmark the changes you want as PRs first \
+             (each bookmark becomes one PR).",
             config.trunk
         ));
     }
 
-    // Best-effort GitHub adoption: discover each change's open PR if we can.
+    // Best-effort GitHub adoption: discover each head's open PR if we can.
     let gh = match (
         remote::resolve(&loaded.repo, &config.remote).ok(),
         client::build().ok(),
@@ -59,34 +65,31 @@ pub async fn run(name: String) -> Result<()> {
         eprintln!("note: GitHub unavailable; tracking changes without PR discovery.");
     }
 
-    println!("Tracking {} change(s) into stack '{name}':", described.len());
-    let mut members = Vec::with_capacity(described.len());
+    println!("Tracking {} change(s) into stack '{name}':", heads.len());
+    let mut members = Vec::with_capacity(heads.len());
     let mut adopted = 0usize;
 
-    for commit in &described {
+    for (commit, bk) in &heads {
         let change_id = commit.change_id().hex();
         let short = &change_id[..8];
-        let bookmark = bookmarks::for_commit(&loaded.repo, commit.id());
 
-        let detail = match (&gh, &bookmark) {
-            (Some((client, repo)), Some(bk)) => pr::find_detail_by_head(client, repo, bk).await?,
-            _ => None,
+        let detail = match &gh {
+            Some((client, repo)) => pr::find_detail_by_head(client, repo, bk).await?,
+            None => None,
         };
 
         let mut meta = ChangeMeta {
-            bookmark: bookmark.clone(),
+            bookmark: Some(bk.clone()),
             ..Default::default()
         };
-        match (&bookmark, &detail) {
-            (_, Some((number, base, state))) => {
+        match &detail {
+            Some((number, base, state)) => {
                 meta.pr_number = Some(*number);
                 meta.base_branch = Some(base.clone());
                 adopted += 1;
-                let bk = bookmark.as_deref().unwrap_or("?");
                 println!("  {short}  {bk} → PR #{number} [{}] (base {base})", state.label());
             }
-            (Some(bk), None) => println!("  {short}  {bk}"),
-            (None, None) => println!("  {short}  (no bookmark)"),
+            None => println!("  {short}  {bk}"),
         }
 
         store.changes.insert(change_id.clone(), meta);
@@ -96,7 +99,7 @@ pub async fn run(name: String) -> Result<()> {
     store.stacks.insert(name.clone(), Stack { members });
     store.save()?;
 
-    let n = described.len();
+    let n = heads.len();
     if gh.is_some() {
         println!("\nTracked stack '{name}': {n} change(s), {adopted} with existing PR(s).");
     } else {
