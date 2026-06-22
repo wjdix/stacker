@@ -34,11 +34,13 @@ Stack selection defaults to the stack containing the current change (`@`); pass 
 Running `stacker` with no arguments opens an interactive terminal UI. It opens on the stack containing `@` (or, if `@` isn't in a tracked stack, the first one). With multiple tracked stacks, the header shows `Stack: <name> [i/n]` and **`Tab`/`Shift-Tab`** cycle between them (re-resolving and re-fetching the selected one):
 
 - **Left pane** — the stack, head on top: change-id, summary, bookmark, and `PR #`. The bullet is color-coded: **green** = mergeable now, **blue** = clean but must wait for the PRs below it (or already merged), **yellow** = not ready, **red ⚠** = conflict.
-- **Right pane** — detail for the selected change's PR: title/state, a **ready-to-merge verdict**, and the **list of CI checks** with pass/fail/running status, failing checks listed first. PR data loads in the background (`◌ Loading…`) without blocking navigation.
+- **Right pane** — a compact PR-status header on top (title/state, ready-to-merge verdict, and a one-line check summary with failing names; press `c` to expand the full check list), and below it the selected change's **diff**, rendered with **difftastic** (syntax-aware, inline) and scrollable with `PgDn`/`PgUp`. PR data loads in the background (`◌ Loading…`) without blocking navigation; the diff loads per selection.
 - **Background auto-refresh.** While the TUI is open it re-checks PR status/checks every 30s in the background (no input blocking); a `⟳ checking…` footer indicator shows when a refresh is in flight. `r` forces an immediate refresh.
 - **Bell on bottom ready/merged.** When the bottom of the stack (the trunk-nearest PR) becomes *ready to merge* or *merged*, the terminal bell rings once (on the transition) and the footer notes it — so you can leave the TUI open and get pinged when the stack is actionable.
 - **Stack-aware merge readiness.** A PR is only shown as *ready to merge now* (green) when every PR **below** it has merged. Higher PRs that GitHub reports as "clean" (they target the PR beneath them, not trunk) are shown as "Ready, but merge the PR(s) below it first" — because stacks must merge from the bottom up.
-- **Keys**: `↑/↓` (or `j/k`) move · `Tab`/`Shift-Tab` switch stack · `o` open PR in browser · `p` submit (open/update PRs) · `s` sync · `l` land · `a` add change · `r` refresh · `q`/`Esc` quit.
+- **Keys**: `↑/↓` (or `j/k`) move · `PgDn`/`PgUp` scroll diff · `c` expand/collapse checks · `Tab`/`Shift-Tab` switch stack · `o` open PR in browser · `p` submit (open/update PRs) · `s` sync · `l` land · `a` add change · `r` refresh · `q`/`Esc` quit.
+
+The diff uses [difftastic](https://difftastic.wilfred.me.uk/) via `jj diff --tool difft` (inline, color), falling back to a plain unified diff if `difft` isn't installed.
 
 `s`/`l`/`a` run `stacker sync`/`land`/`add` on the current stack: the TUI suspends, the command runs in the normal terminal (showing its plan and confirmation prompt), then the TUI re-opens and reloads the updated stack. Requires a terminal and GitHub auth; for scripting use the subcommands instead.
 

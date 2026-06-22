@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 /// How often the TUI re-checks PR status in the background.
 const AUTO_REFRESH: Duration = Duration::from_secs(30);
 
+use ansi_to_tui::IntoText;
 use anyhow::{Result, bail};
 use jj_lib::object_id::ObjectId;
 use octocrab::Octocrab;
@@ -46,26 +47,14 @@ struct FetchResult {
 
 struct Row {
     short: String,
-    /// Current commit-id (hex) — used as the revset for `jj show`.
+    /// Current commit-id (hex) — the revset for `jj diff`.
     commit: String,
     summary: String,
-    bookmark: Option<String>,
     pr_number: Option<u64>,
     has_conflict: bool,
     detail: Detail,
-}
-
-/// A scrollable in-TUI diff view for the selected change.
-struct Diff {
-    title: String,
-    lines: Vec<Line<'static>>,
-    scroll: u16,
-}
-
-impl Diff {
-    fn max_scroll(&self) -> u16 {
-        (self.lines.len() as u16).saturating_sub(1)
-    }
+    /// Lazily-loaded, styled diff lines for this change (the right pane).
+    diff: Option<Vec<Line<'static>>>,
 }
 
 struct App {
@@ -76,8 +65,10 @@ struct App {
     rows: Vec<Row>,
     selected: usize,
     footer: String,
-    /// When set, a diff overlay is shown instead of the stack view.
-    diff: Option<Diff>,
+    /// Vertical scroll offset of the right-pane diff for the selected change.
+    diff_scroll: u16,
+    /// Whether the per-check list is expanded (default: minimized to a summary).
+    show_checks: bool,
     gh: Option<(Octocrab, GitHubRepo)>,
     /// Number of PR fetches still in flight in the current batch.
     outstanding: usize,
@@ -90,9 +81,30 @@ impl App {
         if !self.rows.is_empty() {
             self.selected = (self.selected + 1).min(self.rows.len() - 1);
         }
+        self.diff_scroll = 0;
     }
     fn prev(&mut self) {
         self.selected = self.selected.saturating_sub(1);
+        self.diff_scroll = 0;
+    }
+
+    /// Load the selected change's diff (via difftastic) if not already cached.
+    /// `width` is the right pane's width, used for difft's inline formatting.
+    fn ensure_selected_diff(&mut self, width: usize) {
+        if let Some(row) = self.rows.get_mut(self.selected)
+            && row.diff.is_none()
+        {
+            row.diff = Some(load_diff(&row.commit, width));
+        }
+    }
+
+    /// Number of diff lines for the selected change (for scroll clamping).
+    fn selected_diff_len(&self) -> u16 {
+        self.rows
+            .get(self.selected)
+            .and_then(|r| r.diff.as_ref())
+            .map(|d| d.len() as u16)
+            .unwrap_or(0)
     }
 
     /// Open the selected change's PR in the default browser.
@@ -226,10 +238,10 @@ async fn gather(cwd: &std::path::Path, preferred: Option<&str>) -> Result<Option
             short: e.short_change_id.clone(),
             commit: e.commit_id.hex(),
             summary: e.summary.clone(),
-            bookmark: e.bookmark.clone(),
             pr_number: e.pr_number,
             has_conflict: e.has_conflict,
             detail: Detail::NoPr,
+            diff: None,
         })
         .collect();
 
@@ -240,6 +252,8 @@ async fn gather(cwd: &std::path::Path, preferred: Option<&str>) -> Result<Option
         rows,
         selected: 0,
         footer: String::new(),
+        diff_scroll: 0,
+        show_checks: false,
         gh,
         outstanding: 0,
         refreshing: false,
@@ -260,6 +274,7 @@ async fn event_loop(
     // `None` = no baseline yet (just (re)built a stack); avoids ringing the bell
     // merely from loading or switching to an already-ready stack.
     let mut prev_bottom: Option<BottomState> = None;
+    app.ensure_selected_diff(right_pane_width(terminal));
     terminal.draw(|f| ui(f, app))?;
 
     loop {
@@ -299,6 +314,19 @@ async fn event_loop(
                 }
                 KeyCode::Char('o') => {
                     app.open_selected_pr();
+                    dirty = true;
+                }
+                KeyCode::PageDown | KeyCode::Char(' ') => {
+                    let max = app.selected_diff_len().saturating_sub(1);
+                    app.diff_scroll = (app.diff_scroll + 15).min(max);
+                    dirty = true;
+                }
+                KeyCode::PageUp => {
+                    app.diff_scroll = app.diff_scroll.saturating_sub(15);
+                    dirty = true;
+                }
+                KeyCode::Char('c') => {
+                    app.show_checks = !app.show_checks;
                     dirty = true;
                 }
                 KeyCode::Tab | KeyCode::BackTab if app.stacks.len() > 1 => {
@@ -396,10 +424,17 @@ async fn event_loop(
         }
 
         if dirty {
+            app.ensure_selected_diff(right_pane_width(terminal));
             terminal.draw(|f| ui(f, app))?;
         }
     }
     Ok(())
+}
+
+/// Right-pane width (≈58% of the terminal, minus borders), for difft formatting.
+fn right_pane_width(terminal: &ratatui::DefaultTerminal) -> usize {
+    let w = terminal.size().map(|s| s.width).unwrap_or(120);
+    ((w as usize) * 58 / 100).saturating_sub(4).max(40)
 }
 
 /// Leave the TUI, run a command (so its plan/confirmation/output appear in the
@@ -485,28 +520,50 @@ fn ui(f: &mut Frame, app: &App) {
     list_state.select(Some(app.selected));
     f.render_stateful_widget(list, cols[0], &mut list_state);
 
-    // Right: detail for the selected row.
-    let detail = app
+    // Right: compact PR status header on top, the change's diff (scrollable) below.
+    let sel_eligible = eligible.get(app.selected).copied().unwrap_or(false);
+    let header = app
         .rows
         .get(app.selected)
-        .map(|r| detail_lines(r, eligible.get(app.selected).copied().unwrap_or(false)))
+        .map(|r| status_header(r, sel_eligible, app.show_checks))
         .unwrap_or_default();
-    let title = app
+    let pr_title = app
         .rows
         .get(app.selected)
         .and_then(|r| r.pr_number)
         .map(|n| format!(" PR #{n} "))
         .unwrap_or_else(|| " Pull request ".into());
-    let para = Paragraph::new(detail)
-        .block(Block::bordered().title(title))
-        .wrap(Wrap { trim: false });
-    f.render_widget(para, cols[1]);
+
+    // Header takes its content height (+borders), capped so the diff keeps room.
+    let max_header = cols[1].height.saturating_sub(4).max(3);
+    let header_h = ((header.len() as u16) + 2).min(max_header);
+    let right =
+        Layout::vertical([Constraint::Length(header_h), Constraint::Min(0)]).split(cols[1]);
+
+    f.render_widget(
+        Paragraph::new(header)
+            .block(Block::bordered().title(pr_title))
+            .wrap(Wrap { trim: false }),
+        right[0],
+    );
+
+    let diff_lines = app
+        .rows
+        .get(app.selected)
+        .and_then(|r| r.diff.clone())
+        .unwrap_or_else(|| vec![Line::from("loading diff…").style(Style::new().fg(Color::DarkGray))]);
+    f.render_widget(
+        Paragraph::new(diff_lines)
+            .block(Block::bordered().title(" Diff (difftastic) "))
+            .scroll((app.diff_scroll, 0)),
+        right[1],
+    );
 
     // Footer.
     let help = if app.stacks.len() > 1 {
-        "↑/↓ move   ⇥ stack   o open   p submit   s sync   l land   a add   r refresh   q quit"
+        "↑/↓ move   ⇥ stack   PgDn/PgUp diff   c checks   o open   p submit   s sync   l land   a add   r refresh   q quit"
     } else {
-        "↑/↓ move   o open   p submit   s sync   l land   a add   r refresh   q quit"
+        "↑/↓ move   PgDn/PgUp diff   c checks   o open   p submit   s sync   l land   a add   r refresh   q quit"
     };
     let status = if app.refreshing {
         "⟳ checking…"
@@ -558,6 +615,69 @@ fn definitive_bottom(rows: &[Row]) -> Option<BottomState> {
         Some(Detail::Loading) => None,
         _ => Some(bottom_state(rows)),
     }
+}
+
+/// Load a change's diff for the right pane. Prefers **difftastic** (`jj diff
+/// --tool difft`, inline + forced color, parsed from ANSI), and falls back to a
+/// self-colorized `jj diff --git` if difft isn't available.
+fn load_diff(commit: &str, width: usize) -> Vec<Line<'static>> {
+    let dft = std::process::Command::new("jj")
+        .args(["--ignore-working-copy", "diff", "--tool", "difft", "-r", commit])
+        .env("DFT_COLOR", "always")
+        .env("DFT_DISPLAY", "inline")
+        .env("DFT_WIDTH", width.max(40).to_string())
+        .output();
+
+    if let Ok(out) = &dft
+        && out.status.success()
+    {
+        if out.stdout.is_empty() {
+            return vec![Line::from("(no changes)").style(Style::new().fg(Color::DarkGray))];
+        }
+        if let Ok(text) = out.stdout.into_text() {
+            return text.lines;
+        }
+    }
+
+    // Fallback: plain unified diff, colorized ourselves.
+    let git = std::process::Command::new("jj")
+        .args(["--ignore-working-copy", "diff", "--git", "-r", commit])
+        .output();
+    match git {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            if text.trim().is_empty() {
+                return vec![Line::from("(no changes)").style(Style::new().fg(Color::DarkGray))];
+            }
+            text.lines().map(style_diff_line).collect()
+        }
+        Ok(o) => vec![error_line(&String::from_utf8_lossy(&o.stderr))],
+        Err(e) => vec![error_line(&format!("couldn't run jj diff: {e}"))],
+    }
+}
+
+fn error_line(msg: &str) -> Line<'static> {
+    Line::from(format!("diff unavailable: {}", msg.trim())).style(Style::new().fg(Color::Red))
+}
+
+/// Colorize one line of a `--git` unified diff (fallback path).
+fn style_diff_line(l: &str) -> Line<'static> {
+    let style = if l.starts_with("diff --git")
+        || l.starts_with("index ")
+        || l.starts_with("+++")
+        || l.starts_with("---")
+    {
+        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else if l.starts_with("@@") {
+        Style::new().fg(Color::Magenta)
+    } else if l.starts_with('+') {
+        Style::new().fg(Color::Green)
+    } else if l.starts_with('-') {
+        Style::new().fg(Color::Red)
+    } else {
+        Style::new()
+    };
+    Line::from(Span::styled(l.to_string(), style))
 }
 
 /// Ring the terminal bell.
@@ -618,50 +738,40 @@ fn merge_glyph(d: &PrDetail, eligible: bool) -> (&'static str, Style) {
     }
 }
 
-fn detail_lines(row: &Row, eligible: bool) -> Vec<Line<'static>> {
+/// Compact PR status for the top of the right pane (checks minimized by default).
+fn status_header(row: &Row, eligible: bool, show_checks: bool) -> Vec<Line<'static>> {
     match &row.detail {
         Detail::Loading => vec![
             Line::from(format!("{}  {}", row.short, row.summary)),
-            bookmark_line(row),
-            Line::raw(""),
-            Line::from(Span::styled(
-                "◌ Loading PR data…",
-                Style::new().fg(Color::Cyan),
-            )),
+            Line::from(Span::styled("◌ Loading PR data…", Style::new().fg(Color::Cyan))),
         ],
         Detail::NoPr => vec![
             Line::from(format!("{}  {}", row.short, row.summary)),
-            bookmark_line(row),
-            Line::raw(""),
             Line::from("No PR opened for this change yet.").style(Style::new().fg(Color::DarkGray)),
-            Line::from("Run `stacker submit` to open it.").style(Style::new().fg(Color::DarkGray)),
         ],
         Detail::Unavailable(why) => vec![
             Line::from(format!("{}  {}", row.short, row.summary)),
-            bookmark_line(row),
-            Line::raw(""),
             Line::from(Span::styled(
                 format!("PR data unavailable: {why}"),
                 Style::new().fg(Color::Yellow),
             )),
         ],
-        Detail::Loaded(d) => loaded_detail_lines(row, d, eligible),
+        Detail::Loaded(d) => loaded_header(d, eligible, show_checks),
     }
 }
 
-fn loaded_detail_lines(row: &Row, d: &PrDetail, eligible: bool) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        Line::from(Span::styled(
-            format!("#{}  {}", d.number, d.title),
-            Style::new().add_modifier(Modifier::BOLD),
-        )),
-        bookmark_line(row),
-        Line::from(format!("State: {}", state_label(d.state))),
-        Line::raw(""),
-    ];
+fn loaded_header(d: &PrDetail, eligible: bool, show_checks: bool) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
 
-    // The merge verdict accounts for stack position: a PR that's clean per
-    // GitHub still isn't mergeable until the PRs below it have landed.
+    // Title + state.
+    lines.push(Line::from(vec![
+        Span::styled(format!("#{} ", d.number), Style::new().fg(Color::DarkGray)),
+        Span::styled(d.title.clone(), Style::new().add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
+        Span::styled(format!("[{}]", state_label(d.state)), Style::new().fg(Color::DarkGray)),
+    ]));
+
+    // Stack-aware merge verdict.
     let (color, text) = match d.state {
         PrState::Merged => (Color::Blue, "✓ Merged".to_string()),
         PrState::Closed => (Color::DarkGray, "Closed".to_string()),
@@ -672,28 +782,26 @@ fn loaded_detail_lines(row: &Row, d: &PrDetail, eligible: bool) -> Vec<Line<'sta
         ),
         _ => (Color::Yellow, format!("✗ {}", d.verdict.summary)),
     };
-    lines.push(Line::from(vec![
-        Span::raw("Merge: "),
-        Span::styled(text, Style::new().fg(color).add_modifier(Modifier::BOLD)),
-    ]));
-    // When clean-but-waiting, still surface the underlying check counts.
-    if d.verdict.ready && !eligible && d.state == PrState::Open {
-        lines.push(
-            Line::from(format!("       (GitHub: {})", d.verdict.summary))
-                .style(Style::new().fg(Color::DarkGray)),
-        );
+    let mut verdict = vec![Span::styled(
+        text,
+        Style::new().fg(color).add_modifier(Modifier::BOLD),
+    )];
+    if d.state == PrState::Open {
+        verdict.push(Span::styled(
+            format!("  ({})", d.mergeable_state),
+            Style::new().fg(Color::DarkGray),
+        ));
     }
-    lines.push(Line::from(format!("Mergeable state: {}", d.mergeable_state)));
-    lines.push(Line::raw(""));
+    lines.push(Line::from(verdict));
 
-    lines.push(Line::from(Span::styled(
-        format!("Checks ({})", d.checks.len()),
-        Style::new().add_modifier(Modifier::BOLD),
-    )));
+    // Checks: a one-line summary by default; the full list when expanded (`c`).
     if d.checks.is_empty() {
-        lines.push(Line::from("  No checks reported.").style(Style::new().fg(Color::DarkGray)));
-    } else {
-        // Failing first, then running, then the rest — most relevant on top.
+        lines.push(Line::from("no checks reported").style(Style::new().fg(Color::DarkGray)));
+    } else if show_checks {
+        lines.push(Line::from(Span::styled(
+            format!("Checks ({})", d.checks.len()),
+            Style::new().add_modifier(Modifier::BOLD),
+        )));
         let mut ordered: Vec<&pr::CheckLine> = d.checks.iter().collect();
         ordered.sort_by_key(|c| check_sort_key(c.outcome));
         for c in ordered {
@@ -705,20 +813,36 @@ fn loaded_detail_lines(row: &Row, d: &PrDetail, eligible: bool) -> Vec<Line<'sta
                 Span::raw(c.name.clone()),
             ]));
         }
-    }
-
-    if !d.url.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(d.url.clone()).style(Style::new().fg(Color::DarkGray)));
+    } else {
+        let count = |o| d.checks.iter().filter(|c| c.outcome == o).count();
+        let (passed, failed, running) = (
+            count(CheckOutcome::Passed),
+            count(CheckOutcome::Failed),
+            count(CheckOutcome::Running),
+        );
+        lines.push(Line::from(vec![
+            Span::raw("checks: "),
+            Span::styled(format!("✓ {passed}"), Style::new().fg(Color::Green)),
+            Span::raw("  "),
+            Span::styled(format!("✗ {failed}"), Style::new().fg(Color::Red)),
+            Span::raw("  "),
+            Span::styled(format!("• {running}"), Style::new().fg(Color::Yellow)),
+            Span::styled("   (c expands)", Style::new().fg(Color::DarkGray)),
+        ]));
+        if failed > 0 {
+            let names: Vec<String> = d
+                .checks
+                .iter()
+                .filter(|c| c.outcome == CheckOutcome::Failed)
+                .map(|c| c.name.clone())
+                .collect();
+            lines.push(Line::from(Span::styled(
+                format!("  failing: {}", names.join(", ")),
+                Style::new().fg(Color::Red),
+            )));
+        }
     }
     lines
-}
-
-fn bookmark_line(row: &Row) -> Line<'static> {
-    match &row.bookmark {
-        Some(b) => Line::from(format!("Bookmark: {b}")).style(Style::new().fg(Color::DarkGray)),
-        None => Line::from("Bookmark: (none)").style(Style::new().fg(Color::DarkGray)),
-    }
 }
 
 fn state_label(s: PrState) -> &'static str {
@@ -785,23 +909,27 @@ mod tests {
             rows: vec![
                 Row {
                     short: "abc12345".into(),
+                    commit: "c0ffee01".into(),
                     summary: "Add login form".into(),
-                    bookmark: Some("wd/login".into()),
                     pr_number: Some(42),
                     has_conflict: false,
                     detail: Detail::Loaded(Box::new(detail)),
+                    diff: None,
                 },
                 Row {
                     short: "def67890".into(),
+                    commit: "c0ffee02".into(),
                     summary: "WIP".into(),
-                    bookmark: None,
                     pr_number: None,
                     has_conflict: false,
                     detail: Detail::NoPr,
+                    diff: None,
                 },
             ],
             selected: 0,
             footer: String::new(),
+            diff_scroll: 0,
+            show_checks: false,
             gh: None,
             outstanding: 0,
             refreshing: false,
@@ -916,23 +1044,27 @@ mod tests {
                 // head-first: index 0 = top, index 1 = bottom (nearest trunk)
                 Row {
                     short: "top00000".into(),
+                    commit: "c0ffee03".into(),
                     summary: "top".into(),
-                    bookmark: None,
                     pr_number: Some(2),
                     has_conflict: false,
                     detail: ready_pr(2),
+                    diff: None,
                 },
                 Row {
                     short: "bot00000".into(),
+                    commit: "c0ffee04".into(),
                     summary: "bot".into(),
-                    bookmark: None,
                     pr_number: Some(1),
                     has_conflict: false,
                     detail: ready_pr(1),
+                    diff: None,
                 },
             ],
             selected: 0,
             footer: String::new(),
+            diff_scroll: 0,
+            show_checks: false,
             gh: None,
             outstanding: 0,
             refreshing: false,
