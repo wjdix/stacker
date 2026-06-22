@@ -316,6 +316,15 @@ async fn event_loop(
                     app.open_selected_pr();
                     dirty = true;
                 }
+                KeyCode::Char('J') => {
+                    let max = app.selected_diff_len().saturating_sub(1);
+                    app.diff_scroll = (app.diff_scroll + 1).min(max);
+                    dirty = true;
+                }
+                KeyCode::Char('K') => {
+                    app.diff_scroll = app.diff_scroll.saturating_sub(1);
+                    dirty = true;
+                }
                 KeyCode::PageDown | KeyCode::Char(' ') => {
                     let max = app.selected_diff_len().saturating_sub(1);
                     app.diff_scroll = (app.diff_scroll + 15).min(max);
@@ -561,9 +570,9 @@ fn ui(f: &mut Frame, app: &App) {
 
     // Footer.
     let help = if app.stacks.len() > 1 {
-        "↑/↓ move   ⇥ stack   PgDn/PgUp diff   c checks   o open   p submit   s sync   l land   a add   r refresh   q quit"
+        "↑/↓ move   ⇥ stack   J/K scroll diff   c checks   o open   p submit   s sync   l land   a add   r refresh   q quit"
     } else {
-        "↑/↓ move   PgDn/PgUp diff   c checks   o open   p submit   s sync   l land   a add   r refresh   q quit"
+        "↑/↓ move   J/K scroll diff   c checks   o open   p submit   s sync   l land   a add   r refresh   q quit"
     };
     let status = if app.refreshing {
         "⟳ checking…"
