@@ -91,6 +91,15 @@ pub async fn new_on_top(
         commit
     };
 
+    // `edit` may abandon the previous (empty) working-copy commit. If that
+    // commit had descendants, they must be rebased before the transaction can
+    // be committed, or jj-lib panics ("Descendants have not been rebased").
+    tx.repo_mut()
+        .rebase_descendants()
+        .await
+        .map_err(|e| anyhow!(e))
+        .context("failed to rebase descendants of the abandoned working-copy commit")?;
+
     let new_repo = tx
         .commit("stacker: new change on top")
         .await
