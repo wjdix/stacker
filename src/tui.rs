@@ -55,6 +55,19 @@ struct Row {
     detail: Detail,
 }
 
+/// A scrollable in-TUI diff view for the selected change.
+struct Diff {
+    title: String,
+    lines: Vec<Line<'static>>,
+    scroll: u16,
+}
+
+impl Diff {
+    fn max_scroll(&self) -> u16 {
+        (self.lines.len() as u16).saturating_sub(1)
+    }
+}
+
 struct App {
     /// All tracked stack names (sorted); `stack_idx` indexes into this.
     stacks: Vec<String>,
@@ -63,6 +76,8 @@ struct App {
     rows: Vec<Row>,
     selected: usize,
     footer: String,
+    /// When set, a diff overlay is shown instead of the stack view.
+    diff: Option<Diff>,
     gh: Option<(Octocrab, GitHubRepo)>,
     /// Number of PR fetches still in flight in the current batch.
     outstanding: usize,
