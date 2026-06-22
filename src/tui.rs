@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 const AUTO_REFRESH: Duration = Duration::from_secs(30);
 
 use anyhow::{Result, bail};
+use jj_lib::object_id::ObjectId;
 use octocrab::Octocrab;
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -45,6 +46,8 @@ struct FetchResult {
 
 struct Row {
     short: String,
+    /// Current commit-id (hex) — used as the revset for `jj show`.
+    commit: String,
     summary: String,
     bookmark: Option<String>,
     pr_number: Option<u64>,
@@ -206,6 +209,7 @@ async fn gather(cwd: &std::path::Path, preferred: Option<&str>) -> Result<Option
         .rev()
         .map(|e| Row {
             short: e.short_change_id.clone(),
+            commit: e.commit_id.hex(),
             summary: e.summary.clone(),
             bookmark: e.bookmark.clone(),
             pr_number: e.pr_number,
