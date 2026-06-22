@@ -325,15 +325,6 @@ async fn event_loop(
                     app.diff_scroll = app.diff_scroll.saturating_sub(1);
                     dirty = true;
                 }
-                KeyCode::PageDown | KeyCode::Char(' ') => {
-                    let max = app.selected_diff_len().saturating_sub(1);
-                    app.diff_scroll = (app.diff_scroll + 15).min(max);
-                    dirty = true;
-                }
-                KeyCode::PageUp => {
-                    app.diff_scroll = app.diff_scroll.saturating_sub(15);
-                    dirty = true;
-                }
                 KeyCode::Char('c') => {
                     app.show_checks = !app.show_checks;
                     dirty = true;
