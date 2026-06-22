@@ -19,7 +19,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
-use crate::commands::{add, land, sync};
+use crate::commands::{add, land, submit, sync};
 use crate::config::Config;
 use crate::github::client;
 use crate::github::pr::{self, CheckOutcome, PrDetail, PrState};
@@ -305,6 +305,18 @@ async fn event_loop(
                     prev_bottom = None;
                     dirty = true;
                 }
+                KeyCode::Char('p') => {
+                    let name = app.name.clone();
+                    let title = format!("submit {name}");
+                    with_suspended(terminal, &title, submit::run(Some(name.clone()), false)).await;
+                    if !reload(app, &name).await? {
+                        break;
+                    }
+                    rx = app.begin_fetch();
+                    last_refresh = Instant::now();
+                    prev_bottom = None;
+                    dirty = true;
+                }
                 KeyCode::Char('s') => {
                     let name = app.name.clone();
                     let title = format!("sync {name}");
@@ -473,9 +485,9 @@ fn ui(f: &mut Frame, app: &App) {
 
     // Footer.
     let help = if app.stacks.len() > 1 {
-        "↑/↓ move   ⇥ stack   o open   s sync   l land   a add   r refresh   q quit"
+        "↑/↓ move   ⇥ stack   o open   p submit   s sync   l land   a add   r refresh   q quit"
     } else {
-        "↑/↓ move   o open   s sync   l land   a add   r refresh   q quit"
+        "↑/↓ move   o open   p submit   s sync   l land   a add   r refresh   q quit"
     };
     let status = if app.refreshing {
         "⟳ checking…"
@@ -800,6 +812,7 @@ mod tests {
         assert!(content.contains("✓")); // passing glyph
         // footer advertises the action keys
         assert!(content.contains("o open"));
+        assert!(content.contains("p submit"));
         assert!(content.contains("s sync"));
         assert!(content.contains("l land"));
         assert!(content.contains("a add"));
