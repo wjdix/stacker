@@ -18,7 +18,7 @@ A *stack* is a linear chain of jj changes, each tagged with a bookmark, each bac
 |---|---|
 | `stacker` (no args) | Open the interactive **TUI** (see below). |
 | `stacker info` | Resolved repo key, trunk commit, config. |
-| `stacker status` | Each tracked stack, ordered, with bookmark, PR #, live PR state, conflict markers. |
+| `stacker status` | Each tracked stack, ordered, with bookmark, PR #, live PR state, conflict markers. Auto-adopts PRs opened by other tools (records any open PR whose head matches a tracked change's bookmark). |
 | `stacker create <name> [--workspace <path>] [-m msg]` | Start a **new** stack: a fresh change on trunk. With `--workspace <path>` the change is created in a new jj workspace at that path (name derived from it), leaving the current workspace untouched. |
 | `stacker track <name>` | Adopt **existing** changes as a named stack. Members are the **bookmarked PR heads** between trunk and `@` (one bookmark = one PR); commits between bookmarks are that PR's content, not separate members. Discovers each PR (number + base) when GitHub is reachable. Read-only. |
 | `stacker untrack <name>` | Stop tracking a stack: forget stacker's metadata. Leaves jj changes, bookmarks, and PRs untouched. |
@@ -35,6 +35,7 @@ Running `stacker` with no arguments opens an interactive terminal UI. It opens o
 
 - **Left pane** — the stack, head on top: change-id, summary, bookmark, and `PR #`. The bullet is color-coded: **green** = mergeable now, **blue** = clean but must wait for the PRs below it (or already merged), **yellow** = not ready, **red ⚠** = conflict.
 - **Right pane** — a compact PR-status header on top (title/state, ready-to-merge verdict, and a one-line check summary with failing names; press `c` to expand the full check list), and below it the selected change's **diff**, rendered with **difftastic** (syntax-aware, inline) and scrollable with `PgDn`/`PgUp`. PR data loads in the background (`◌ Loading…`) without blocking navigation; the diff loads per selection.
+- **Auto-adopts external PRs.** When the TUI opens or (re)builds a stack, any tracked change that has a bookmark but no recorded PR is matched to an open PR by head branch and recorded — so PRs opened by `gh`, the web UI, or another tool show up without `submit`.
 - **Background auto-refresh.** While the TUI is open it re-checks PR status/checks every 30s in the background (no input blocking); a `⟳ checking…` footer indicator shows when a refresh is in flight. `r` forces an immediate refresh.
 - **Bell on bottom ready/merged.** When the bottom of the stack (the trunk-nearest PR) becomes *ready to merge* or *merged*, the terminal bell rings once (on the transition) and the footer notes it — so you can leave the TUI open and get pinged when the stack is actionable.
 - **Stack-aware merge readiness.** A PR is only shown as *ready to merge now* (green) when every PR **below** it has merged. Higher PRs that GitHub reports as "clean" (they target the PR beneath them, not trunk) are shown as "Ready, but merge the PR(s) below it first" — because stacks must merge from the bottom up.

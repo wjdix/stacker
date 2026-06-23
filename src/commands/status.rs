@@ -17,10 +17,10 @@ pub async fn run() -> Result<()> {
     let loaded = repo::load(&cwd).await?;
     let state_dir = paths::repo_state_dir(loaded.repo_path())?;
     let config = Config::load(&state_dir)?;
-    let store = Store::load(&state_dir)?;
+    let mut store = Store::load(&state_dir)?;
 
     if store.stacks.is_empty() {
-        println!("No stacks tracked yet. Create one with `stacker new` (coming soon).");
+        println!("No stacks tracked yet. Create one with `stacker create` or adopt with `stacker track`.");
         return Ok(());
     }
 
@@ -35,11 +35,26 @@ pub async fn run() -> Result<()> {
     }
 
     let trunk_id = trunk::resolve(&loaded.repo, &config.trunk, &config.remote).ok();
-    for name in store.stacks.keys() {
-        let resolved =
+    let names: Vec<String> = store.stacks.keys().cloned().collect();
+    let mut store_changed = false;
+    for name in &names {
+        let mut resolved =
             stack::resolve(&loaded.repo, &store, name, &config.trunk, trunk_id.as_ref())?;
+
+        // Auto-adopt PRs opened by other tools, then re-resolve to show them.
+        if let (Some(client), Some(repo)) = (&client, &gh_repo)
+            && stack::adopt_external_prs(&resolved, &mut store, client, repo).await? > 0
+        {
+            store_changed = true;
+            resolved =
+                stack::resolve(&loaded.repo, &store, name, &config.trunk, trunk_id.as_ref())?;
+        }
+
         print_stack(&resolved, client.as_ref(), gh_repo.as_ref()).await;
         println!();
+    }
+    if store_changed {
+        store.save()?;
     }
 
     Ok(())

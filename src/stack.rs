@@ -11,6 +11,10 @@ use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId;
 use jj_lib::repo::{ReadonlyRepo, Repo};
 
+use octocrab::Octocrab;
+
+use crate::github::pr;
+use crate::github::remote::GitHubRepo;
 use crate::jj::graph::{self, Resolved};
 use crate::jj::repo::LoadedRepo;
 use crate::store::Store;
@@ -38,6 +42,35 @@ pub struct ResolvedStack {
     pub missing: Vec<String>,
     /// Members that have landed (are now ancestors of trunk) — prunable.
     pub landed: Vec<String>,
+}
+
+/// Adopt externally-opened PRs: for each resolved entry that has a bookmark but
+/// no recorded PR, look it up on GitHub by head branch and record its number and
+/// base. Returns how many were newly adopted; the caller persists the store.
+pub async fn adopt_external_prs(
+    resolved: &ResolvedStack,
+    store: &mut Store,
+    client: &Octocrab,
+    repo: &GitHubRepo,
+) -> Result<usize> {
+    let mut adopted = 0;
+    for entry in &resolved.entries {
+        if entry.pr_number.is_some() {
+            continue;
+        }
+        let Some(bookmark) = &entry.bookmark else {
+            continue;
+        };
+        if let Some((number, base, _state)) = pr::find_detail_by_head(client, repo, bookmark).await?
+        {
+            let meta = store.changes.entry(entry.change_id.clone()).or_default();
+            meta.bookmark = Some(bookmark.clone());
+            meta.pr_number = Some(number);
+            meta.base_branch = Some(base);
+            adopted += 1;
+        }
+    }
+    Ok(adopted)
 }
 
 /// Infer which tracked stack the current change (@) belongs to.

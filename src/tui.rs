@@ -205,7 +205,7 @@ async fn gather(cwd: &std::path::Path, preferred: Option<&str>) -> Result<Option
     let loaded = repo::load(cwd).await?;
     let state_dir = paths::repo_state_dir(loaded.repo_path())?;
     let config = Config::load(&state_dir)?;
-    let store = Store::load(&state_dir)?;
+    let mut store = Store::load(&state_dir)?;
 
     if store.stacks.is_empty() {
         return Ok(None);
@@ -219,7 +219,8 @@ async fn gather(cwd: &std::path::Path, preferred: Option<&str>) -> Result<Option
     let stacks: Vec<String> = store.stacks.keys().cloned().collect();
     let stack_idx = stacks.iter().position(|n| n == &name).unwrap_or(0);
     let trunk_id = trunk::resolve(&loaded.repo, &config.trunk, &config.remote).ok();
-    let resolved = stack::resolve(&loaded.repo, &store, &name, &config.trunk, trunk_id.as_ref())?;
+    let mut resolved =
+        stack::resolve(&loaded.repo, &store, &name, &config.trunk, trunk_id.as_ref())?;
 
     let gh = match (
         remote::resolve(&loaded.repo, &config.remote).ok(),
@@ -228,6 +229,15 @@ async fn gather(cwd: &std::path::Path, preferred: Option<&str>) -> Result<Option
         (Some(r), Some(c)) => Some((c, r)),
         _ => None,
     };
+
+    // Auto-adopt PRs opened by other tools, then re-resolve to reflect them.
+    if let Some((client, repo)) = &gh
+        && stack::adopt_external_prs(&resolved, &mut store, client, repo).await? > 0
+    {
+        store.save()?;
+        resolved =
+            stack::resolve(&loaded.repo, &store, &name, &config.trunk, trunk_id.as_ref())?;
+    }
 
     // Head on top, like `stacker status`.
     let rows: Vec<Row> = resolved
