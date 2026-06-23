@@ -219,8 +219,6 @@ async fn gather(cwd: &std::path::Path, preferred: Option<&str>) -> Result<Option
     let stacks: Vec<String> = store.stacks.keys().cloned().collect();
     let stack_idx = stacks.iter().position(|n| n == &name).unwrap_or(0);
     let trunk_id = trunk::resolve(&loaded.repo, &config.trunk, &config.remote).ok();
-    let mut resolved =
-        stack::resolve(&loaded.repo, &store, &name, &config.trunk, trunk_id.as_ref())?;
 
     let gh = match (
         remote::resolve(&loaded.repo, &config.remote).ok(),
@@ -230,13 +228,19 @@ async fn gather(cwd: &std::path::Path, preferred: Option<&str>) -> Result<Option
         _ => None,
     };
 
-    // Auto-adopt PRs opened by other tools, then re-resolve to reflect them.
-    if let Some((client, repo)) = &gh
-        && stack::adopt_external_prs(&resolved, &mut store, client, repo).await? > 0
-    {
+    // Discover changes appended by other tools and adopt their PRs, then resolve.
+    let gh_ref = gh.as_ref().map(|(c, r)| (c, r));
+    let (resolved, changed) = stack::refresh_and_resolve(
+        &loaded,
+        &mut store,
+        &name,
+        &config.trunk,
+        trunk_id.as_ref(),
+        gh_ref,
+    )
+    .await?;
+    if changed {
         store.save()?;
-        resolved =
-            stack::resolve(&loaded.repo, &store, &name, &config.trunk, trunk_id.as_ref())?;
     }
 
     // Head on top, like `stacker status`.
@@ -410,6 +414,23 @@ async fn event_loop(
                     prev_bottom = None;
                     dirty = true;
                 }
+                KeyCode::Char('d') => {
+                    let name = app.name.clone();
+                    let title = format!("drop {name}");
+                    with_suspended(
+                        terminal,
+                        &title,
+                        crate::commands::drop::run(Some(name.clone()), false),
+                    )
+                    .await;
+                    if !reload(app, &name).await? {
+                        break;
+                    }
+                    rx = app.begin_fetch();
+                    last_refresh = Instant::now();
+                    prev_bottom = None;
+                    dirty = true;
+                }
                 _ => {}
             }
         }
@@ -571,9 +592,9 @@ fn ui(f: &mut Frame, app: &App) {
 
     // Footer.
     let help = if app.stacks.len() > 1 {
-        "↑/↓ move   ⇥ stack   J/K scroll diff   c checks   o open   p submit   s sync   l land   a add   r refresh   q quit"
+        "↑/↓ move   ⇥ stack   J/K scroll diff   c checks   o open   p submit   s sync   l land   d drop   a add   r refresh   q quit"
     } else {
-        "↑/↓ move   J/K scroll diff   c checks   o open   p submit   s sync   l land   a add   r refresh   q quit"
+        "↑/↓ move   J/K scroll diff   c checks   o open   p submit   s sync   l land   d drop   a add   r refresh   q quit"
     };
     let status = if app.refreshing {
         "⟳ checking…"
@@ -972,6 +993,7 @@ mod tests {
         assert!(content.contains("p submit"));
         assert!(content.contains("s sync"));
         assert!(content.contains("l land"));
+        assert!(content.contains("d drop"));
         assert!(content.contains("a add"));
         assert!(content.contains("q quit"));
     }

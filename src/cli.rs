@@ -76,4 +76,12 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// If the bottom PR was closed without merging, abandon it and restack the rest onto trunk.
+    Drop {
+        /// Stack name; if omitted, inferred from the current change (@).
+        stack: Option<String>,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }

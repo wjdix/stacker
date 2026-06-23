@@ -2,6 +2,7 @@
 
 pub mod add;
 pub mod create;
+pub mod drop;
 pub mod info;
 pub mod land;
 pub mod status;

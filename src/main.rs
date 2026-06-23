@@ -46,5 +46,6 @@ async fn run() -> anyhow::Result<()> {
         Command::Add { stack, message } => commands::add::run(stack, message).await,
         Command::Sync { stack, yes, no_fetch } => commands::sync::run(stack, yes, no_fetch).await,
         Command::Land { stack, yes } => commands::land::run(stack, yes).await,
+        Command::Drop { stack, yes } => commands::drop::run(stack, yes).await,
     }
 }

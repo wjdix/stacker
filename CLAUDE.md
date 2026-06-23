@@ -46,8 +46,9 @@ src/
     remote.rs        #   parse owner/repo from the git remote URL
     pr.rs            #   create/update/find PRs, fetch state
     nav_comment.rs   #   render + upsert the stack-navigation comment
-  commands/          # one module per subcommand (info/status/create/track/untrack/add/submit/sync/land)
+  commands/          # one module per subcommand (info/status/create/track/untrack/add/submit/sync/land/drop)
                      #   create = new stack · track = adopt existing · add = +change on a stack
+                     #   land = drop merged bottom (content in trunk) · drop = abandon closed-unmerged bottom
   tui.rs             # interactive TUI (no-args): stack + per-PR merge-readiness/checks
 ```
 

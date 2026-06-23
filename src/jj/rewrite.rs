@@ -58,3 +58,33 @@ pub async fn rebase_stack_onto(
         .context("failed to commit rebase")?;
     Ok(true)
 }
+
+/// Abandon `target`, rebasing its descendants onto `target`'s parent(s).
+///
+/// Used to drop the bottom of a stack whose PR was closed without merging: the
+/// change's diff is discarded and the changes above it become children of its
+/// parent (trunk, for a stack bottom). jj records any resulting conflicts inside
+/// the rewritten commits rather than stopping, so the caller must inspect for
+/// conflicts afterward. A bookmark at `target` is moved to the parent or deleted
+/// per jj's default rewrite-refs policy. The abandon is recoverable via `jj op`.
+pub async fn abandon_change(loaded: &LoadedRepo, target: &CommitId) -> Result<()> {
+    let commit = loaded
+        .repo
+        .store()
+        .get_commit(target)
+        .context("failed to load change to abandon")?;
+
+    let mut tx = loaded.repo.start_transaction();
+    tx.repo_mut().record_abandoned_commit(&commit);
+    tx.repo_mut()
+        .rebase_descendants()
+        .await
+        .map_err(|e| anyhow!(e))
+        .context("failed to rebase descendants after abandon")?;
+
+    tx.commit("stacker: abandon dropped change")
+        .await
+        .map_err(|e| anyhow!(e))
+        .context("failed to commit abandon")?;
+    Ok(())
+}

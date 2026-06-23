@@ -38,17 +38,21 @@ pub async fn run() -> Result<()> {
     let names: Vec<String> = store.stacks.keys().cloned().collect();
     let mut store_changed = false;
     for name in &names {
-        let mut resolved =
-            stack::resolve(&loaded.repo, &store, name, &config.trunk, trunk_id.as_ref())?;
-
-        // Auto-adopt PRs opened by other tools, then re-resolve to show them.
-        if let (Some(client), Some(repo)) = (&client, &gh_repo)
-            && stack::adopt_external_prs(&resolved, &mut store, client, repo).await? > 0
-        {
-            store_changed = true;
-            resolved =
-                stack::resolve(&loaded.repo, &store, name, &config.trunk, trunk_id.as_ref())?;
-        }
+        // Discover changes appended by other tools and adopt their PRs.
+        let gh = match (&client, &gh_repo) {
+            (Some(c), Some(r)) => Some((c, r)),
+            _ => None,
+        };
+        let (resolved, changed) = stack::refresh_and_resolve(
+            &loaded,
+            &mut store,
+            name,
+            &config.trunk,
+            trunk_id.as_ref(),
+            gh,
+        )
+        .await?;
+        store_changed |= changed;
 
         print_stack(&resolved, client.as_ref(), gh_repo.as_ref()).await;
         println!();

@@ -44,6 +44,89 @@ pub struct ResolvedStack {
     pub landed: Vec<String>,
 }
 
+/// Discover changes appended to the stack by another tool: any **bookmarked**
+/// change that descends from the stack's current head and isn't already a
+/// member is added (a PR head = one stack member). Returns how many were added.
+pub fn discover_appended_members(
+    repo: &ReadonlyRepo,
+    resolved: &ResolvedStack,
+    store: &mut Store,
+    name: &str,
+) -> Result<usize> {
+    let Some(head) = resolved.entries.last() else {
+        return Ok(0); // empty stack — nothing to extend from
+    };
+    let head_id = head.commit_id.clone();
+    let index = repo.index();
+
+    let mut members: HashSet<String> = store
+        .stacks
+        .get(name)
+        .map(|s| s.members.iter().cloned().collect())
+        .unwrap_or_default();
+
+    let mut added = Vec::new();
+    for (_bookmark, target) in repo.view().local_bookmarks() {
+        let Some(commit_id) = target.as_normal() else {
+            continue;
+        };
+        if commit_id == &head_id {
+            continue;
+        }
+        // Strict descendant of the head?
+        if index
+            .is_ancestor(&head_id, commit_id)
+            .context("ancestry check while discovering appended members")?
+        {
+            let change_id = repo
+                .store()
+                .get_commit(commit_id)
+                .context("load bookmarked commit")?
+                .change_id()
+                .hex();
+            if members.insert(change_id.clone()) {
+                added.push(change_id);
+            }
+        }
+    }
+
+    if !added.is_empty()
+        && let Some(stack) = store.stacks.get_mut(name)
+    {
+        stack.members.extend(added.iter().cloned());
+    }
+    Ok(added.len())
+}
+
+/// Reconcile a stack with reality and resolve it: discover appended bookmarked
+/// changes, adopt externally-opened PRs, then resolve. Returns the resolved
+/// stack and whether the stored metadata changed (so the caller can persist).
+pub async fn refresh_and_resolve(
+    loaded: &LoadedRepo,
+    store: &mut Store,
+    name: &str,
+    trunk_bookmark: &str,
+    trunk_id: Option<&CommitId>,
+    gh: Option<(&Octocrab, &GitHubRepo)>,
+) -> Result<(ResolvedStack, bool)> {
+    let mut changed = false;
+    let mut resolved = resolve(&loaded.repo, store, name, trunk_bookmark, trunk_id)?;
+
+    if discover_appended_members(&loaded.repo, &resolved, store, name)? > 0 {
+        changed = true;
+        resolved = resolve(&loaded.repo, store, name, trunk_bookmark, trunk_id)?;
+    }
+
+    if let Some((client, repo)) = gh
+        && adopt_external_prs(&resolved, store, client, repo).await? > 0
+    {
+        changed = true;
+        resolved = resolve(&loaded.repo, store, name, trunk_bookmark, trunk_id)?;
+    }
+
+    Ok((resolved, changed))
+}
+
 /// Adopt externally-opened PRs: for each resolved entry that has a bookmark but
 /// no recorded PR, look it up on GitHub by head branch and record its number and
 /// base. Returns how many were newly adopted; the caller persists the store.
