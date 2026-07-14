@@ -7,7 +7,7 @@ A *stack* is a linear chain of jj changes, each tagged with a bookmark, each bac
 ## Design
 
 - **Native jj** via in-process `jj-lib` (no shelling out for repo ops). Pinned to `jj-lib =0.41.0` to match the installed `jj 0.41`; a startup guard refuses to run on a version mismatch to avoid on-disk format corruption.
-- **Native GitHub** via the `octocrab` API crate. Token resolved from `GITHUB_TOKEN`, then `GH_TOKEN`, then `gh auth token`. `owner/repo` parsed from the jj git remote URL.
+- **Native GitHub** via the `octocrab` API crate (REST plus GraphQL where required). Token resolved from `GITHUB_TOKEN`, then `GH_TOKEN`, then `gh auth token`. `owner/repo` parsed from the jj git remote URL.
 - **Named, multiple stacks** per repo. Membership is stored; **order is derived from the jj commit graph**.
 - **Metadata** lives in a global, per-repo state dir (keyed by the canonical `.jj/repo` path), so it works across jj workspaces and is never committed.
 - **First-class conflicts**: a rebase never stops; conflicts are recorded inside commits. stacker skips conflicted changes (and everything above them), reports them, and exits non-zero.
@@ -25,10 +25,36 @@ A *stack* is a linear chain of jj changes, each tagged with a bookmark, each bac
 | `stacker add [stack] [-m msg]` | Add a new empty change on top of an existing stack and check it out. |
 | `stacker submit [stack] [--yes]` | Create/update draft PRs bottom→top with chained bases; force-push (lease-safe); maintain a stack-navigation comment. Shows a plan and confirms first. |
 | `stacker sync [stack] [--yes] [--no-fetch]` | Fetch trunk, rebase the whole stack onto it, then update all PRs. `--no-fetch` rebases onto the locally-known trunk. |
+| `stacker merge [stack] --check <command> [--all] [--method merge|squash|rebase] [--yes]` | Run a user command to decide whether the bottom PR is ready, merge it through the GitHub API, land/restack, and mark the new bottom ready for review. Without `--all`, processes one PR; `--all` continues bottom-to-top until the check fails or the stack is empty. |
 | `stacker land [stack] [--yes]` | If the bottom PR is merged, fetch trunk, drop the bottom, and restack the rest. |
 | `stacker drop [stack] [--yes]` | If the bottom PR was **closed without merging**, abandon that change (discarding its diff) and restack the rest onto trunk. Only runs when the bottom PR is closed-unmerged; a merged bottom is redirected to `land`, a still-open bottom is refused. |
 
 Stack selection defaults to the stack containing the current change (`@`); pass a name to override.
+
+### Merging a stack
+
+`stacker merge` delegates the project-specific readiness decision to a shell command. Exit status **0** means the current bottom PR is ready; any nonzero status stops cleanly without merging it. The command inherits the terminal and receives:
+
+- `STACKER_PR_NUMBER` — current bottom PR number
+- `STACKER_PR_URL` — current bottom PR URL
+- `STACKER_REPO` — `owner/repo`
+- `STACKER_STACK` — stack name
+- `STACKER_CHANGE_ID` — full jj change ID
+- `STACKER_HEAD_SHA` — current GitHub PR head SHA
+
+For example:
+
+```sh
+# Process only the current bottom using a fast readiness probe.
+stacker merge my-stack --check 'ci-tool ready "$STACKER_PR_NUMBER"'
+
+# Process the whole stack; this check may wait for CI after each restack.
+stacker merge my-stack --all \
+  --check 'ci-tool wait "$STACKER_PR_NUMBER"' \
+  --method squash
+```
+
+GitHub operations are native: merging uses the REST API with a head-SHA guard, and draft-to-ready uses GitHub's GraphQL API. `--all` does not add its own polling delay; after each restack it immediately invokes the readiness command for the new bottom. Newly created PRs are drafts, so the first bottom must already be ready for review; after each successful land, stacker marks the next bottom ready automatically. Authentication uses `GITHUB_TOKEN`, then `GH_TOKEN`, then `gh auth token` as a token-discovery fallback.
 
 ## TUI
 

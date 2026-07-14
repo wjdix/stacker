@@ -1,6 +1,13 @@
 //! Command-line interface definition.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum MergeStrategy {
+    Merge,
+    Squash,
+    Rebase,
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -67,6 +74,23 @@ pub enum Command {
         /// Don't fetch trunk first; rebase onto the locally-known trunk.
         #[arg(long)]
         no_fetch: bool,
+    },
+    /// Merge the ready bottom PR, land it, and optionally continue through the stack.
+    Merge {
+        /// Stack name; if omitted, inferred from the current change (@).
+        stack: Option<String>,
+        /// Shell command whose exit status says whether the bottom PR is ready (0 = ready).
+        #[arg(long, value_name = "COMMAND")]
+        check: String,
+        /// Keep merging bottom-to-top until the stack is empty or the check fails.
+        #[arg(long)]
+        all: bool,
+        /// GitHub merge method.
+        #[arg(long, value_enum, default_value_t = MergeStrategy::Squash)]
+        method: MergeStrategy,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
     },
     /// If the bottom PR is merged, drop it and restack the rest onto trunk.
     Land {

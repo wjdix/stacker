@@ -4,7 +4,9 @@ use anyhow::{Context, Result};
 use octocrab::Octocrab;
 use octocrab::models::IssueState;
 use octocrab::models::pulls::{MergeableState, PullRequest};
+use octocrab::params::pulls::MergeMethod;
 use octocrab::params::repos::Commitish;
+use serde_json::json;
 
 use crate::github::remote::GitHubRepo;
 
@@ -44,12 +46,126 @@ fn classify(pr: &PullRequest) -> PrState {
     }
 }
 
-/// Fetch the coarse state of a PR by number.
-pub async fn fetch_state(
+/// Fields needed to safely merge a pull request and expose it to a readiness command.
+#[derive(Debug, Clone)]
+pub struct MergeCandidate {
+    pub state: PrState,
+    pub head_sha: String,
+    pub url: String,
+}
+
+/// Fetch the current state and head SHA of a merge candidate.
+pub async fn fetch_merge_candidate(
     client: &Octocrab,
     repo: &GitHubRepo,
     number: u64,
-) -> Result<PrState> {
+) -> Result<MergeCandidate> {
+    let pr = client
+        .pulls(&repo.owner, &repo.repo)
+        .get(number)
+        .await
+        .with_context(|| format!("failed to fetch PR #{number}"))?;
+    Ok(MergeCandidate {
+        state: classify(&pr),
+        head_sha: pr.head.sha.clone(),
+        url: pr
+            .html_url
+            .as_ref()
+            .map(|u| u.to_string())
+            .unwrap_or_default(),
+    })
+}
+
+/// Merge a PR through GitHub's REST API, guarded by its previously observed
+/// head SHA. A successful HTTP response can still report `merged: false`.
+pub async fn merge(
+    client: &Octocrab,
+    repo: &GitHubRepo,
+    number: u64,
+    head_sha: &str,
+    method: MergeMethod,
+) -> Result<()> {
+    let result = client
+        .pulls(&repo.owner, &repo.repo)
+        .merge(number)
+        .sha(head_sha)
+        .method(method)
+        .send()
+        .await
+        .with_context(|| format!("failed to merge PR #{number}"))?;
+    if !result.merged {
+        return Err(anyhow::anyhow!(
+            "GitHub did not merge PR #{number}: {}",
+            result.message.as_deref().unwrap_or("no reason provided")
+        ));
+    }
+    Ok(())
+}
+
+/// Mark a draft PR ready for review. GitHub exposes this write only through
+/// GraphQL, so use the REST response's node ID with the native GraphQL API.
+/// Returns true when a draft was changed, false when it was already ready.
+pub async fn mark_ready(client: &Octocrab, repo: &GitHubRepo, number: u64) -> Result<bool> {
+    let pr = client
+        .pulls(&repo.owner, &repo.repo)
+        .get(number)
+        .await
+        .with_context(|| format!("failed to fetch PR #{number}"))?;
+    if !pr.draft.unwrap_or(false) {
+        return Ok(false);
+    }
+    let node_id = pr
+        .node_id
+        .ok_or_else(|| anyhow::anyhow!("PR #{number} has no GitHub node ID"))?;
+    let payload = ready_payload(&node_id);
+    let response: serde_json::Value = client
+        .graphql(&payload)
+        .await
+        .with_context(|| format!("failed to mark PR #{number} ready for review"))?;
+    validate_ready_response(&response, number)?;
+    Ok(true)
+}
+
+fn ready_payload(node_id: &str) -> serde_json::Value {
+    json!({
+        "query": "mutation($pullRequestId: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $pullRequestId }) { pullRequest { number isDraft } } }",
+        "variables": { "pullRequestId": node_id }
+    })
+}
+
+fn validate_ready_response(response: &serde_json::Value, number: u64) -> Result<()> {
+    if let Some(errors) = response.get("errors").and_then(|v| v.as_array())
+        && !errors.is_empty()
+    {
+        let messages = errors
+            .iter()
+            .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(anyhow::anyhow!(
+            "GitHub rejected ready-for-review for PR #{number}: {}",
+            if messages.is_empty() {
+                "unknown GraphQL error"
+            } else {
+                &messages
+            }
+        ));
+    }
+    let pull = response
+        .pointer("/data/markPullRequestReadyForReview/pullRequest")
+        .ok_or_else(|| {
+            anyhow::anyhow!("GitHub returned no pull request after marking PR #{number} ready")
+        })?;
+    if pull.get("isDraft").and_then(|v| v.as_bool()) != Some(false) {
+        return Err(anyhow::anyhow!(
+            "PR #{number} is still a draft after ready-for-review mutation"
+        ));
+    }
+    Ok(())
+}
+
+/// Fetch the coarse state of a PR by number.
+pub async fn fetch_state(client: &Octocrab, repo: &GitHubRepo, number: u64) -> Result<PrState> {
     let pr = client
         .pulls(&repo.owner, &repo.repo)
         .get(number)
@@ -60,11 +176,7 @@ pub async fn fetch_state(
 
 /// Find an existing PR whose head branch is `head` (any state). Returns its
 /// number if present.
-pub async fn find_by_head(
-    client: &Octocrab,
-    repo: &GitHubRepo,
-    head: &str,
-) -> Result<Option<u64>> {
+pub async fn find_by_head(client: &Octocrab, repo: &GitHubRepo, head: &str) -> Result<Option<u64>> {
     let qualified = format!("{}:{}", repo.owner, head);
     let page = client
         .pulls(&repo.owner, &repo.repo)
@@ -204,20 +316,45 @@ fn mergeable_state_label(s: Option<&MergeableState>) -> &'static str {
 }
 
 fn derive_verdict(pr: &PullRequest, state: PrState, checks: &[CheckLine]) -> Verdict {
-    let failing = checks.iter().filter(|c| c.outcome == CheckOutcome::Failed).count();
-    let running = checks.iter().filter(|c| c.outcome == CheckOutcome::Running).count();
+    let failing = checks
+        .iter()
+        .filter(|c| c.outcome == CheckOutcome::Failed)
+        .count();
+    let running = checks
+        .iter()
+        .filter(|c| c.outcome == CheckOutcome::Running)
+        .count();
     let suffix = if checks.is_empty() {
         String::new()
     } else {
-        let passed = checks.iter().filter(|c| c.outcome == CheckOutcome::Passed).count();
+        let passed = checks
+            .iter()
+            .filter(|c| c.outcome == CheckOutcome::Passed)
+            .count();
         format!("  ({passed} passed, {failing} failing, {running} running)")
     };
-    let ready = |s: &str| Verdict { ready: true, summary: format!("{s}{suffix}") };
-    let no = |s: &str| Verdict { ready: false, summary: format!("{s}{suffix}") };
+    let ready = |s: &str| Verdict {
+        ready: true,
+        summary: format!("{s}{suffix}"),
+    };
+    let no = |s: &str| Verdict {
+        ready: false,
+        summary: format!("{s}{suffix}"),
+    };
 
     match state {
-        PrState::Merged => return Verdict { ready: false, summary: "Merged".into() },
-        PrState::Closed => return Verdict { ready: false, summary: "Closed".into() },
+        PrState::Merged => {
+            return Verdict {
+                ready: false,
+                summary: "Merged".into(),
+            };
+        }
+        PrState::Closed => {
+            return Verdict {
+                ready: false,
+                summary: "Closed".into(),
+            };
+        }
         _ => {}
     }
     if pr.draft.unwrap_or(false) {
@@ -235,11 +372,7 @@ fn derive_verdict(pr: &PullRequest, state: PrState, checks: &[CheckLine]) -> Ver
 }
 
 /// Fetch full PR detail (merge readiness + check runs on the head commit).
-pub async fn fetch_detail(
-    client: &Octocrab,
-    repo: &GitHubRepo,
-    number: u64,
-) -> Result<PrDetail> {
+pub async fn fetch_detail(client: &Octocrab, repo: &GitHubRepo, number: u64) -> Result<PrDetail> {
     let pr = client
         .pulls(&repo.owner, &repo.repo)
         .get(number)
@@ -275,6 +408,53 @@ pub async fn fetch_detail(
         mergeable_state: mergeable_state_label(pr.mergeable_state.as_ref()),
         verdict,
         checks,
-        url: pr.html_url.as_ref().map(|u| u.to_string()).unwrap_or_default(),
+        url: pr
+            .html_url
+            .as_ref()
+            .map(|u| u.to_string())
+            .unwrap_or_default(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ready_payload_uses_node_id_variable() {
+        let payload = ready_payload("PR_node_123");
+        assert_eq!(payload["variables"]["pullRequestId"], "PR_node_123");
+        assert!(
+            payload["query"]
+                .as_str()
+                .unwrap()
+                .contains("markPullRequestReadyForReview")
+        );
+    }
+
+    #[test]
+    fn ready_response_requires_non_draft_pr() {
+        let ok = json!({
+            "data": { "markPullRequestReadyForReview": { "pullRequest": {
+                "number": 7, "isDraft": false
+            } } }
+        });
+        assert!(validate_ready_response(&ok, 7).is_ok());
+
+        let still_draft = json!({
+            "data": { "markPullRequestReadyForReview": { "pullRequest": {
+                "number": 7, "isDraft": true
+            } } }
+        });
+        assert!(validate_ready_response(&still_draft, 7).is_err());
+    }
+
+    #[test]
+    fn ready_response_reports_graphql_errors() {
+        let response = json!({ "errors": [{ "message": "not authorized" }] });
+        let error = validate_ready_response(&response, 7)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not authorized"));
+    }
 }

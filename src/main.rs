@@ -38,13 +38,26 @@ async fn run() -> anyhow::Result<()> {
         Command::Info => commands::info::run().await,
         Command::Status => commands::status::run().await,
         Command::Submit { stack, yes } => commands::submit::run(stack, yes).await,
-        Command::Create { name, workspace, message } => {
-            commands::create::run(name, workspace, message).await
-        }
+        Command::Create {
+            name,
+            workspace,
+            message,
+        } => commands::create::run(name, workspace, message).await,
         Command::Track { name } => commands::track::run(name).await,
         Command::Untrack { name } => commands::untrack::run(name).await,
         Command::Add { stack, message } => commands::add::run(stack, message).await,
-        Command::Sync { stack, yes, no_fetch } => commands::sync::run(stack, yes, no_fetch).await,
+        Command::Sync {
+            stack,
+            yes,
+            no_fetch,
+        } => commands::sync::run(stack, yes, no_fetch).await,
+        Command::Merge {
+            stack,
+            check,
+            all,
+            method,
+            yes,
+        } => commands::merge::run(stack, check, all, method, yes).await,
         Command::Land { stack, yes } => commands::land::run(stack, yes).await,
         Command::Drop { stack, yes } => commands::drop::run(stack, yes).await,
     }
