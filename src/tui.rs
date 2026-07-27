@@ -431,6 +431,23 @@ async fn event_loop(
                     prev_bottom = None;
                     dirty = true;
                 }
+                KeyCode::Char('D') => {
+                    let name = app.name.clone();
+                    let title = format!("abandon {name}");
+                    with_suspended(
+                        terminal,
+                        &title,
+                        crate::commands::abandon::run(Some(name.clone()), false),
+                    )
+                    .await;
+                    if !reload(app, &name).await? {
+                        break;
+                    }
+                    rx = app.begin_fetch();
+                    last_refresh = Instant::now();
+                    prev_bottom = None;
+                    dirty = true;
+                }
                 _ => {}
             }
         }
@@ -592,9 +609,9 @@ fn ui(f: &mut Frame, app: &App) {
 
     // Footer.
     let help = if app.stacks.len() > 1 {
-        "↑/↓ move   ⇥ stack   J/K scroll diff   c checks   o open   p submit   s sync   l land   d drop   a add   r refresh   q quit"
+        "↑/↓ move   ⇥ stack   J/K scroll diff   c checks   o open   p submit   s sync   l land   d drop   D abandon   a add   r refresh   q quit"
     } else {
-        "↑/↓ move   J/K scroll diff   c checks   o open   p submit   s sync   l land   d drop   a add   r refresh   q quit"
+        "↑/↓ move   J/K scroll diff   c checks   o open   p submit   s sync   l land   d drop   D abandon   a add   r refresh   q quit"
     };
     let status = if app.refreshing {
         "⟳ checking…"

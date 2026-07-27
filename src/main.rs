@@ -60,5 +60,6 @@ async fn run() -> anyhow::Result<()> {
         } => commands::merge::run(stack, check, all, method, yes).await,
         Command::Land { stack, yes } => commands::land::run(stack, yes).await,
         Command::Drop { stack, yes } => commands::drop::run(stack, yes).await,
+        Command::Abandon { stack, yes } => commands::abandon::run(stack, yes).await,
     }
 }

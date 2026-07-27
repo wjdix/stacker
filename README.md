@@ -28,6 +28,7 @@ A *stack* is a linear chain of jj changes, each tagged with a bookmark, each bac
 | `stacker merge [stack] --check <command> [--all] [--method merge|squash|rebase] [--yes]` | Run a user command to decide whether the bottom PR is ready, merge it through the GitHub API, land/restack, and mark the new bottom ready for review. Without `--all`, processes one PR; `--all` continues bottom-to-top until the check fails or the stack is empty. |
 | `stacker land [stack] [--yes]` | If the bottom PR is merged, fetch trunk, drop the bottom, and restack the rest. |
 | `stacker drop [stack] [--yes]` | If the bottom PR was **closed without merging**, abandon that change (discarding its diff) and restack the rest onto trunk. Only runs when the bottom PR is closed-unmerged; a merged bottom is redirected to `land`, a still-open bottom is refused. |
+| `stacker abandon [stack] [--yes]` | Abandon **every** change in a stack (discarding their diffs), delete its local bookmarks, and stop tracking it — the whole-stack teardown for work that won't land. Refused while any member PR is still open or draft; closed/merged PRs and remote branches are untouched. A stack with no live changes is simply removed. Recoverable with `jj undo`. |
 
 Stack selection defaults to the stack containing the current change (`@`); pass a name to override.
 
@@ -66,11 +67,11 @@ Running `stacker` with no arguments opens an interactive terminal UI. It opens o
 - **Background auto-refresh.** While the TUI is open it re-checks PR status/checks every 30s in the background (no input blocking); a `⟳ checking…` footer indicator shows when a refresh is in flight. `r` forces an immediate refresh.
 - **Bell on bottom ready/merged.** When the bottom of the stack (the trunk-nearest PR) becomes *ready to merge* or *merged*, the terminal bell rings once (on the transition) and the footer notes it — so you can leave the TUI open and get pinged when the stack is actionable.
 - **Stack-aware merge readiness.** A PR is only shown as *ready to merge now* (green) when every PR **below** it has merged. Higher PRs that GitHub reports as "clean" (they target the PR beneath them, not trunk) are shown as "Ready, but merge the PR(s) below it first" — because stacks must merge from the bottom up.
-- **Keys**: `↑/↓` (or `j/k`) move · `J`/`K` scroll diff · `c` expand/collapse checks · `Tab`/`Shift-Tab` switch stack · `o` open PR in browser · `p` submit (open/update PRs) · `s` sync · `l` land · `d` drop (abandon a closed-unmerged bottom) · `a` add change · `r` refresh · `q`/`Esc` quit.
+- **Keys**: `↑/↓` (or `j/k`) move · `J`/`K` scroll diff · `c` expand/collapse checks · `Tab`/`Shift-Tab` switch stack · `o` open PR in browser · `p` submit (open/update PRs) · `s` sync · `l` land · `d` drop (abandon a closed-unmerged bottom) · `D` abandon the whole stack · `a` add change · `r` refresh · `q`/`Esc` quit.
 
 The diff uses [difftastic](https://difftastic.wilfred.me.uk/) via `jj diff --tool difft` (inline, color), falling back to a plain unified diff if `difft` isn't installed.
 
-`s`/`l`/`d`/`a` run `stacker sync`/`land`/`drop`/`add` on the current stack: the TUI suspends, the command runs in the normal terminal (showing its plan and confirmation prompt), then the TUI re-opens and reloads the updated stack. Requires a terminal and GitHub auth; for scripting use the subcommands instead.
+`s`/`l`/`d`/`D`/`a` run `stacker sync`/`land`/`drop`/`abandon`/`add` on the current stack: the TUI suspends, the command runs in the normal terminal (showing its plan and confirmation prompt), then the TUI re-opens and reloads the updated stack (or switches to the next stack if the current one was abandoned). Requires a terminal and GitHub auth; for scripting use the subcommands instead.
 
 ## Configuration
 

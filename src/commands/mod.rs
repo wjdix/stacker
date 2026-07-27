@@ -1,5 +1,6 @@
 //! Subcommand implementations.
 
+pub mod abandon;
 pub mod add;
 pub mod create;
 pub mod drop;

@@ -8,6 +8,8 @@
 
 use anyhow::{Context, Result, anyhow};
 use jj_lib::backend::CommitId;
+use jj_lib::op_store::RefTarget;
+use jj_lib::ref_name::RefName;
 use jj_lib::repo::Repo;
 use jj_lib::rewrite::CommitRewriter;
 
@@ -86,5 +88,42 @@ pub async fn abandon_change(loaded: &LoadedRepo, target: &CommitId) -> Result<()
         .await
         .map_err(|e| anyhow!(e))
         .context("failed to commit abandon")?;
+    Ok(())
+}
+
+/// Abandon every commit in `targets` (a whole stack) in one transaction,
+/// rebasing any outside descendants onto the nearest surviving ancestor, and
+/// delete the given local bookmarks. The bookmarks are deleted explicitly —
+/// before descendants are rebased — so the rewrite-refs policy doesn't leave
+/// them piled up on trunk. If a target is the working-copy commit, jj-lib
+/// recreates a fresh empty `@` on its parent. Recoverable via `jj undo`.
+pub async fn abandon_stack(
+    loaded: &LoadedRepo,
+    targets: &[CommitId],
+    bookmarks: &[String],
+) -> Result<()> {
+    let mut tx = loaded.repo.start_transaction();
+    for target in targets {
+        let commit = loaded
+            .repo
+            .store()
+            .get_commit(target)
+            .context("failed to load change to abandon")?;
+        tx.repo_mut().record_abandoned_commit(&commit);
+    }
+    for name in bookmarks {
+        tx.repo_mut()
+            .set_local_bookmark_target(RefName::new(name), RefTarget::absent());
+    }
+    tx.repo_mut()
+        .rebase_descendants()
+        .await
+        .map_err(|e| anyhow!(e))
+        .context("failed to rebase descendants after abandoning the stack")?;
+
+    tx.commit("stacker: abandon stack")
+        .await
+        .map_err(|e| anyhow!(e))
+        .context("failed to commit stack abandon")?;
     Ok(())
 }

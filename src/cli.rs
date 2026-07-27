@@ -108,4 +108,12 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Abandon EVERY change in a stack, delete its local bookmarks, and stop tracking it.
+    Abandon {
+        /// Stack name; if omitted, inferred from the current change (@).
+        stack: Option<String>,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
