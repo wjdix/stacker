@@ -64,6 +64,17 @@ pub enum Command {
         #[arg(short, long)]
         message: Option<String>,
     },
+    /// Insert a new empty change at the bottom of a stack (or below a given member) and check it out.
+    Insert {
+        /// Stack name; if omitted, inferred from the current change (@).
+        stack: Option<String>,
+        /// Insert directly below this stack member (change-id prefix). Default: the bottom change.
+        #[arg(long, value_name = "CHANGE")]
+        before: Option<String>,
+        /// Description for the new change.
+        #[arg(short, long)]
+        message: Option<String>,
+    },
     /// Fetch trunk, rebase a stack onto it, and update its PRs.
     Sync {
         /// Stack name; if omitted, inferred from the current change (@).

@@ -21,7 +21,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 use tokio::sync::mpsc;
 
-use crate::commands::{add, land, submit, sync};
+use crate::commands::{add, insert, land, submit, sync};
 use crate::config::Config;
 use crate::github::client;
 use crate::github::pr::{self, CheckOutcome, PrDetail, PrState};
@@ -405,7 +405,24 @@ async fn event_loop(
                 }
                 KeyCode::Char('a') => {
                     let name = app.name.clone();
-                    run_add(terminal, &name).await;
+                    run_new_change(terminal, &name, None).await;
+                    if !reload(app, &name).await? {
+                        break;
+                    }
+                    rx = app.begin_fetch();
+                    last_refresh = Instant::now();
+                    prev_bottom = None;
+                    dirty = true;
+                }
+                KeyCode::Char('i') => {
+                    // Insert a new change directly below the selected one.
+                    // Selecting the bottom row inserts at the bottom of the
+                    // stack; `a` covers the very top.
+                    let Some(before) = app.rows.get(app.selected).map(|r| r.short.clone()) else {
+                        continue;
+                    };
+                    let name = app.name.clone();
+                    run_new_change(terminal, &name, Some(&before)).await;
                     if !reload(app, &name).await? {
                         break;
                     }
@@ -500,11 +517,17 @@ where
     *terminal = ratatui::init();
 }
 
-/// `stacker add`, with an interactive description prompt (read in normal mode).
-async fn run_add(terminal: &mut ratatui::DefaultTerminal, name: &str) {
+/// `stacker add` / `stacker insert`, with an interactive description prompt
+/// (read in normal mode). With `before == None` the new change goes on top of
+/// the stack; otherwise it is inserted directly below that change.
+async fn run_new_change(terminal: &mut ratatui::DefaultTerminal, name: &str, before: Option<&str>) {
     use std::io::Write;
     ratatui::restore();
-    println!("\n── stacker add {name} ──\n");
+    let title = match before {
+        Some(b) => format!("insert {name} --before {b}"),
+        None => format!("add {name}"),
+    };
+    println!("\n── stacker {title} ──\n");
     print!("Description for the new change (optional): ");
     let _ = std::io::stdout().flush();
     let mut input = String::new();
@@ -513,7 +536,11 @@ async fn run_add(terminal: &mut ratatui::DefaultTerminal, name: &str) {
         "" => None,
         s => Some(s.to_string()),
     };
-    if let Err(e) = add::run(Some(name.to_string()), message).await {
+    let result = match before {
+        Some(b) => insert::run(Some(name.to_string()), Some(b.to_string()), message).await,
+        None => add::run(Some(name.to_string()), message).await,
+    };
+    if let Err(e) = result {
         eprintln!("\nerror: {e:#}");
     }
     prompt_enter();
@@ -609,9 +636,9 @@ fn ui(f: &mut Frame, app: &App) {
 
     // Footer.
     let help = if app.stacks.len() > 1 {
-        "↑/↓ move   ⇥ stack   J/K scroll diff   c checks   o open   p submit   s sync   l land   d drop   D abandon   a add   r refresh   q quit"
+        "↑/↓ move   ⇥ stack   J/K scroll diff   c checks   o open   p submit   s sync   l land   d drop   D abandon   a add   i insert   r refresh   q quit"
     } else {
-        "↑/↓ move   J/K scroll diff   c checks   o open   p submit   s sync   l land   d drop   D abandon   a add   r refresh   q quit"
+        "↑/↓ move   J/K scroll diff   c checks   o open   p submit   s sync   l land   d drop   D abandon   a add   i insert   r refresh   q quit"
     };
     let status = if app.refreshing {
         "⟳ checking…"
@@ -1012,6 +1039,7 @@ mod tests {
         assert!(content.contains("l land"));
         assert!(content.contains("d drop"));
         assert!(content.contains("a add"));
+        assert!(content.contains("i insert"));
         assert!(content.contains("q quit"));
     }
 

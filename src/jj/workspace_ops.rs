@@ -1,11 +1,12 @@
-//! Creating a new change on top of the stack and moving the working copy to it.
+//! Creating a new change in the stack and moving the working copy to it.
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use jj_lib::backend::CommitId;
 use jj_lib::commit::Commit;
 use jj_lib::repo::{ReadonlyRepo, Repo};
+use jj_lib::rewrite::CommitRewriter;
 use jj_lib::workspace::Workspace;
 
 /// Refresh the working copy to the repo's head operation, so the jj CLI doesn't
@@ -112,6 +113,98 @@ pub async fn new_on_top(
         .await
         .map_err(|e| anyhow!(e))
         .context("failed to check out new change")?;
+
+    Ok(new_commit)
+}
+
+/// Insert an empty commit between `child` and its parent: the new commit takes
+/// the parent's tree, `child` is reparented onto it, and `child`'s descendants
+/// are rebased along. The new commit becomes the working-copy commit and is
+/// checked out on disk. Returns the new commit.
+pub async fn insert_before(
+    workspace: &mut Workspace,
+    repo: &Arc<ReadonlyRepo>,
+    child: &CommitId,
+    message: Option<&str>,
+) -> Result<Commit> {
+    let wc_name = workspace.workspace_name().to_owned();
+
+    // Tree of the current working-copy commit, for the checkout's diff base.
+    let old_tree = match repo.view().get_wc_commit_id(&wc_name) {
+        Some(id) => Some(repo.store().get_commit(id).context("load current @")?.tree()),
+        None => None,
+    };
+
+    let child_commit = repo
+        .store()
+        .get_commit(child)
+        .context("failed to load the change to insert below")?;
+    let [parent_id] = child_commit.parent_ids() else {
+        bail!("cannot insert below a merge commit (stacks are linear)");
+    };
+    let parent_commit = repo
+        .store()
+        .get_commit(parent_id)
+        .context("failed to load the insertion point's parent")?;
+    // A new empty change shares its parent's tree.
+    let tree = parent_commit.tree();
+
+    let mut tx = repo.start_transaction();
+    // Inherit the child's author/committer identity, since jj-lib's default
+    // settings carry no user.name/user.email (config-path discovery lives in
+    // the jj CLI, not the library).
+    let mut builder = tx
+        .repo_mut()
+        .new_commit(vec![parent_id.clone()], tree)
+        .set_author(child_commit.author().clone())
+        .set_committer(child_commit.committer().clone());
+    if let Some(m) = message {
+        builder = builder.set_description(m);
+    }
+    let new_commit = builder
+        .write()
+        .await
+        .map_err(|e| anyhow!(e))
+        .context("failed to write inserted commit")?;
+
+    // Reparent the child onto the new commit; descendants follow below.
+    CommitRewriter::new(tx.repo_mut(), child_commit, vec![new_commit.id().clone()])
+        .rebase()
+        .await
+        .map_err(|e| anyhow!(e))
+        .context("failed to reparent the change above the insertion")?
+        .write()
+        .await
+        .map_err(|e| anyhow!(e))
+        .context("failed to write reparented change")?;
+
+    tx.repo_mut()
+        .edit(wc_name.clone(), &new_commit)
+        .await
+        .map_err(|e| anyhow!(e))
+        .context("failed to set working-copy commit")?;
+
+    // Rebase the reparented child's descendants (and anything abandoned by
+    // `edit`) before committing, or jj-lib panics ("Descendants have not been
+    // rebased"). Bookmarks on rewritten commits move automatically.
+    tx.repo_mut()
+        .rebase_descendants()
+        .await
+        .map_err(|e| anyhow!(e))
+        .context("failed to rebase descendants of the insertion point")?;
+
+    let new_repo = tx
+        .commit("stacker: insert change")
+        .await
+        .map_err(|e| anyhow!(e))
+        .context("failed to commit inserted change")?;
+
+    let op_id = new_repo.operation().id().clone();
+    workspace
+        .check_out(op_id, old_tree.as_ref(), &new_commit)
+        .await
+        .map_err(|e| anyhow!(e))
+        .context("failed to check out inserted change")?;
 
     Ok(new_commit)
 }

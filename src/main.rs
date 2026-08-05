@@ -46,6 +46,11 @@ async fn run() -> anyhow::Result<()> {
         Command::Track { name } => commands::track::run(name).await,
         Command::Untrack { name } => commands::untrack::run(name).await,
         Command::Add { stack, message } => commands::add::run(stack, message).await,
+        Command::Insert {
+            stack,
+            before,
+            message,
+        } => commands::insert::run(stack, before, message).await,
         Command::Sync {
             stack,
             yes,
